@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+from urllib.parse import urljoin
+
+import httpx
+
+from app.clients.rate_limit import MinuteRateLimiter
+from app.core.config import Settings, get_settings
+
+
+class ConfluenceClient:
+    def __init__(self, settings: Settings | None = None, limiter: MinuteRateLimiter | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.base_url = self.settings.conf_mirror_base_url.rstrip("/")
+        self.prod_base_url = self.settings.conf_prod_base_url.rstrip("/")
+        self.verify_ssl = self.settings.conf_verify_ssl
+        self.timeout = self.settings.sync_request_timeout_seconds
+        self.limiter = limiter or MinuteRateLimiter(limit=self.settings.sync_rate_limit_per_minute)
+
+    def build_page_url(self, page_id: str) -> str:
+        return f"{self.prod_base_url}/pages/viewpage.action?pageId={page_id}"
+
+    def _api_url(self, path: str) -> str:
+        path = path if path.startswith("/") else f"/{path}"
+        return f"{self.base_url}/rest/api{path}"
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        await self.limiter.acquire()
+        async with httpx.AsyncClient(
+            auth=(self.settings.conf_username, self.settings.conf_password),
+            timeout=self.timeout,
+            verify=self.verify_ssl,
+        ) as client:
+            response = await client.request(method, self._api_url(path), **kwargs)
+            response.raise_for_status()
+            return response
+
+    async def fetch_page(self, page_id: str) -> dict[str, Any]:
+        response = await self._request(
+            "GET",
+            f"/content/{page_id}",
+            params={"expand": "body.storage,version,space,history"},
+        )
+        data = response.json()
+        return {
+            "id": str(data["id"]),
+            "title": data["title"],
+            "space_key": data.get("space", {}).get("key", ""),
+            "parent_id": None,
+            "version": data.get("version", {}).get("number", 1),
+            "updated_at": data.get("version", {}).get("when"),
+            "body": data.get("body", {}).get("storage", {}).get("value", ""),
+            "webui": data.get("_links", {}).get("webui", f"/pages/viewpage.action?pageId={page_id}"),
+        }
+
+    async def fetch_descendant_pages(self, root_page_id: str) -> list[dict[str, Any]]:
+        response = await self._request("GET", f"/content/{root_page_id}/descendant/page", params={"limit": 1000})
+        return [{"id": str(item["id"])} for item in response.json().get("results", [])]
+
+    async def search_cql(self, space_key: str, cql: str) -> list[dict[str, Any]]:
+        response = await self._request("GET", "/content/search", params={"cql": cql, "limit": 1000})
+        return [{"id": str(item["id"])} for item in response.json().get("results", [])]
+
+    async def list_attachments(self, page_id: str) -> list[dict[str, Any]]:
+        response = await self._request("GET", f"/content/{page_id}/child/attachment", params={"limit": 1000})
+        attachments: list[dict[str, Any]] = []
+        for item in response.json().get("results", []):
+            attachments.append(
+                {
+                    "id": str(item["id"]),
+                    "filename": item["title"],
+                    "mime_type": item.get("metadata", {}).get("mediaType"),
+                    "download": item.get("_links", {}).get("download"),
+                }
+            )
+        return attachments
+
+    async def download_bytes(self, download_path: str) -> bytes:
+        await self.limiter.acquire()
+        target_url = urljoin(self.base_url + "/", download_path.lstrip("/"))
+        async with httpx.AsyncClient(
+            auth=(self.settings.conf_username, self.settings.conf_password),
+            timeout=self.timeout,
+            verify=self.verify_ssl,
+        ) as client:
+            response = await client.get(target_url)
+            response.raise_for_status()
+            return response.content
+
+    def fetch_page_sync(self, page_id: str) -> dict[str, Any]:
+        return asyncio.run(self.fetch_page(page_id))

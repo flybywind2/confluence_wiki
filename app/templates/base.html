@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}Confluence Wiki{% endblock %}</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/">Confluence Wiki</a>
+        <p class="brand-subtitle">Mirror Sync Knowledge Atlas</p>
+        <nav class="sidebar-nav">
+          <a href="/">문서 홈</a>
+          <a href="/graph{% if selected_space and selected_space != 'all' %}?space={{ selected_space }}{% endif %}">Graph View</a>
+        </nav>
+        <div class="sidebar-block">
+          <div class="sidebar-title">Space</div>
+          <a class="{% if selected_space == 'all' %}active{% endif %}" href="/">전체</a>
+          {% for space in spaces %}
+          <a class="{% if selected_space == space.space_key %}active{% endif %}" href="/spaces/{{ space.space_key }}">{{ space.space_key }}</a>
+          {% endfor %}
+        </div>
+        <form class="search-box" action="/search" method="get">
+          <input type="text" name="q" placeholder="문서 검색" value="{{ search_query or '' }}" />
+          {% if selected_space and selected_space != 'all' %}
+          <input type="hidden" name="space" value="{{ selected_space }}" />
+          {% endif %}
+          <button type="submit">검색</button>
+        </form>
+      </aside>
+      <main class="content">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </body>
+</html>

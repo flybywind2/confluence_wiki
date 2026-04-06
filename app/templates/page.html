@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ page.title }}{% endblock %}
+{% block content %}
+<article class="page-card">
+  <header class="page-header">
+    <span class="eyebrow">{{ page_space_key }}</span>
+    <h1>{{ page.title }}</h1>
+    <div class="page-actions">
+      <a class="source-link" href="{{ page.prod_url }}" target="_blank" rel="noreferrer">원문 보기</a>
+    </div>
+  </header>
+  <section class="wiki-body">{{ body_html | safe }}</section>
+</article>
+{% endblock %}

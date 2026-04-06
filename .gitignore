@@ -10,3 +10,5 @@ build/
 data/
 .env
 .worktrees/
+.runtime/
+*.egg-info/

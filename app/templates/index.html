@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Confluence Wiki{% endblock %}
+{% block content %}
+<section class="hero-card">
+  <div>
+    <span class="eyebrow">나무위키 스타일 문서 탐색</span>
+    <h1>{{ selected_space|upper if selected_space != 'all' else '전체 Space' }}</h1>
+    <p>Confluence mirror에서 동기화한 markdown wiki를 읽기 중심 UI로 제공합니다.</p>
+  </div>
+</section>
+
+<section class="list-card">
+  <div class="section-header">
+    <h2>최근 문서</h2>
+    <span>{{ pages|length }}건</span>
+  </div>
+  {% if pages %}
+  <ul class="page-list">
+    {% for page in pages %}
+    <li>
+      <a href="/spaces/{{ page.space_key }}/pages/{{ page.slug }}">{{ page.title }}</a>
+      <span class="page-meta">{{ page.space_key }}{% if page.updated_at_remote %} · {{ page.updated_at_remote }}{% endif %}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty-state">동기화된 문서가 없습니다.</p>
+  {% endif %}
+</section>
+{% endblock %}
