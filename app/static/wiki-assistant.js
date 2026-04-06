@@ -7,7 +7,7 @@
   const questionInput = document.getElementById("assistant-question");
   const thread = document.getElementById("assistant-thread");
   const status = document.getElementById("assistant-status");
-  const submitButton = form.querySelector(".assistant-submit");
+  const submitButton = form?.querySelector(".assistant-submit");
   const selectedSpace = document.body.dataset.selectedSpace || "all";
 
   if (!fab || !modal || !backdrop || !form || !questionInput || !thread || !status || !submitButton) return;
@@ -32,7 +32,63 @@
     thread.appendChild(bubble);
   };
 
-  const appendAnswer = (payload) => {
+  const createSaveButton = (question, payload) => {
+    const actionRow = document.createElement("div");
+    actionRow.className = "assistant-answer-actions";
+
+    if (selectedSpace === "all") {
+      const note = document.createElement("span");
+      note.className = "assistant-save-note";
+      note.textContent = "분석 문서 저장은 특정 space를 선택한 화면에서만 가능합니다.";
+      actionRow.appendChild(note);
+      return actionRow;
+    }
+
+    const saveButton = document.createElement("button");
+    saveButton.type = "button";
+    saveButton.className = "assistant-save";
+    saveButton.textContent = `${selectedSpace} space에 저장`;
+
+    const savedLink = document.createElement("a");
+    savedLink.className = "assistant-saved-link";
+    savedLink.hidden = true;
+    savedLink.textContent = "저장된 분석 문서 보기";
+
+    saveButton.addEventListener("click", async () => {
+      saveButton.disabled = true;
+      status.textContent = "분석 문서를 저장하는 중입니다...";
+      try {
+        const response = await fetch("/api/ask/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            space_key: selectedSpace,
+            question,
+            scope: payload.scope,
+            answer: payload.answer,
+            sources: payload.sources,
+          }),
+        });
+        const saved = await response.json();
+        if (!response.ok) {
+          throw new Error(saved.detail || "분석 문서 저장에 실패했습니다.");
+        }
+        saveButton.hidden = true;
+        savedLink.href = saved.href;
+        savedLink.hidden = false;
+        status.textContent = `${selectedSpace} space에 분석 문서를 저장했습니다.`;
+      } catch (error) {
+        saveButton.disabled = false;
+        status.textContent = error.message || "분석 문서 저장 중 오류가 발생했습니다.";
+      }
+    });
+
+    actionRow.appendChild(saveButton);
+    actionRow.appendChild(savedLink);
+    return actionRow;
+  };
+
+  const appendAnswer = (payload, question) => {
     const wrapper = document.createElement("div");
     wrapper.className = "assistant-answer";
 
@@ -50,7 +106,7 @@
       for (const source of payload.sources) {
         const item = document.createElement("li");
         const link = document.createElement("a");
-        link.href = `/spaces/${source.space_key}/pages/${source.slug}`;
+        link.href = source.href || `/spaces/${source.space_key}/pages/${source.slug}`;
         link.textContent = `${source.space_key} · ${source.title}`;
         item.appendChild(link);
         if (source.excerpt) {
@@ -64,6 +120,7 @@
       wrapper.appendChild(sourceBox);
     }
 
+    wrapper.appendChild(createSaveButton(question, payload));
     thread.appendChild(wrapper);
     thread.scrollTop = thread.scrollHeight;
   };
@@ -112,10 +169,10 @@
       if (!response.ok) {
         throw new Error(payload.detail || "질문 처리에 실패했습니다.");
       }
-      appendAnswer(payload);
+      appendAnswer(payload, question);
       status.textContent = scope === "global" ? "전체 위키 기준 답변입니다." : `${selectedSpace} space 기준 답변입니다.`;
     } catch (error) {
-      appendAnswer({ answer: error.message || "질문 처리 중 오류가 발생했습니다.", sources: [] });
+      appendAnswer({ answer: error.message || "질문 처리 중 오류가 발생했습니다.", sources: [], scope }, question);
       status.textContent = "오류가 발생했습니다.";
     } finally {
       submitButton.disabled = false;

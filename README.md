@@ -12,11 +12,23 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 - 문서별 history snapshot 저장
 - append-only `log.md` 운영 로그
 - space별 `synthesis.md` 누적 요약 페이지
+- `knowledge/entities`, `knowledge/concepts`, `knowledge/analyses`, `knowledge/lint` 지식 레이어
 - 복잡한 표는 HTML fallback
 - 이미지 로컬 저장 + VLM 기반 한국어 설명
 - Obsidian 스타일 graph view
 - 우측 하단 플로팅 버튼 기반 Wiki Q&A 모달
+- assistant 답변을 분석 문서로 저장하고 재검색 근거로 재사용
 - 외부 스케줄러용 CLI / 관리자 API
+
+## LLM Wiki 구조
+
+이 프로젝트는 [karpathy의 llm-wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) 패턴을 Confluence Data Center에 맞게 구현한 형태입니다.
+
+- raw source: mirror에서 읽는 Confluence 원문
+- wiki: markdown 파일 기반 영속 위키
+- schema: [AGENTS.md](D:/Python/confluence_wiki/repo_clone/.worktrees/codex-confluence-wiki/AGENTS.md)
+
+질문 응답도 일회성 채팅으로 끝내지 않고 `knowledge/analyses/` 아래 markdown로 저장해 다시 위키의 일부로 관리합니다.
 
 ## 환경 변수
 
@@ -226,10 +238,17 @@ Payload 예시:
 
 - 문서: `data/wiki/spaces/<SPACE_KEY>/pages/*.md`
 - 문서 이력: `data/wiki/spaces/<SPACE_KEY>/history/<slug>/v0001.md`
+- 지식 문서:
+  - `data/wiki/spaces/<SPACE_KEY>/knowledge/entities/*.md`
+  - `data/wiki/spaces/<SPACE_KEY>/knowledge/concepts/*.md`
+  - `data/wiki/spaces/<SPACE_KEY>/knowledge/analyses/*.md`
+  - `data/wiki/spaces/<SPACE_KEY>/knowledge/lint/report.md`
+- space 인덱스: `data/wiki/spaces/<SPACE_KEY>/index.md`
 - space 누적 요약: `data/wiki/spaces/<SPACE_KEY>/synthesis.md`
 - space 운영 로그: `data/wiki/spaces/<SPACE_KEY>/log.md`
 - 이미지: `data/wiki/spaces/<SPACE_KEY>/assets/*`
 - 그래프: `data/wiki/global/graph.json`
+- 글로벌 인덱스: `data/wiki/global/index.md`
 - DB: `data/db/app.db`
 
 ## 화면
@@ -238,9 +257,51 @@ Payload 예시:
 - `문서 상세`: 원문 링크, 현재 버전, 최근 history 링크
 - `문서 이력`: 버전 목록과 과거 snapshot 조회
 - `Synthesis`: Space별 누적 요약 페이지
+- `Knowledge`: entity / concept / analysis / lint 문서 렌더링
 - `Graph View`: 계층 링크 + 위키 링크 동시 시각화
+- `Wiki Q&A`: 선택된 space 또는 전체 위키 기준 답변, 분석 문서 저장
+
+## Assistant 저장 흐름
+
+1. 사용자가 우측 하단 `위키에게 묻기` 버튼으로 질문합니다.
+2. assistant는 먼저 `index.md` 를 읽어 후보를 좁히고, 관련 원문/지식 문서를 읽어 답합니다.
+3. 특정 space 화면에서는 답변을 `knowledge/analyses/` 아래 markdown로 저장할 수 있습니다.
+4. 저장 시 `index.md`, `global/index.md`, `log.md`, `lint/report.md` 가 함께 갱신됩니다.
+
+## LLM Knowledge Layer
+
+이 프로젝트는 raw Confluence snapshot만 저장하지 않습니다. gist 방향에 맞춰 `raw page layer` 위에 `knowledge layer`를 같이 유지합니다.
+
+- raw page layer:
+  - 최신 원문 markdown
+  - history snapshot
+  - assets
+- knowledge layer:
+  - entity 문서
+  - concept 문서
+  - assistant 저장 analysis 문서
+  - lint report
+
+assistant가 찾는 근거는 raw page와 knowledge 문서를 함께 사용합니다. 저장된 analysis 문서는 이후 질문에서도 근거로 재활용됩니다.
+
+## Assistant Answer Save Flow
+
+1. space 페이지 또는 문서 화면에서 우측 하단 `위키에게 묻기` 버튼을 엽니다.
+2. 질문 후 답변 카드 하단의 `위키에 저장` 버튼을 누릅니다.
+3. 분석 문서는 현재 선택된 space의 `knowledge/analyses/` 아래에 저장됩니다.
+4. 저장 즉시 `space index`, `global index`, `log.md` 가 함께 갱신됩니다.
+
+전체 홈처럼 `selected_space=all` 인 화면에서는 저장 대상 space가 없으므로 저장 버튼을 노출하지 않습니다.
+
+## 운영 스키마 문서
+
+위키 구조와 유지 규칙은 [AGENTS.md](D:/Python/confluence_wiki/repo_clone/.worktrees/codex-confluence-wiki/AGENTS.md) 에 정리되어 있습니다. 새로운 knowledge kind나 ingest 규칙을 추가할 때 이 문서를 먼저 맞추는 것을 권장합니다.
 
 ## 설계 문서
 
 - [docs/plans/2026-04-06-confluence-wiki-design.md](D:/Python/confluence_wiki/repo_clone/.worktrees/codex-confluence-wiki/docs/plans/2026-04-06-confluence-wiki-design.md)
 - [docs/plans/2026-04-06-confluence-wiki.md](D:/Python/confluence_wiki/repo_clone/.worktrees/codex-confluence-wiki/docs/plans/2026-04-06-confluence-wiki.md)
+- [docs/plans/2026-04-07-persistent-llm-wiki-design.md](D:/Python/confluence_wiki/repo_clone/.worktrees/codex-confluence-wiki/docs/plans/2026-04-07-persistent-llm-wiki-design.md)
+- [docs/plans/2026-04-07-persistent-llm-wiki.md](D:/Python/confluence_wiki/repo_clone/.worktrees/codex-confluence-wiki/docs/plans/2026-04-07-persistent-llm-wiki.md)
+- [docs/plans/2026-04-07-llm-knowledge-layer-design.md](D:/Python/confluence_wiki/repo_clone/.worktrees/codex-confluence-wiki/docs/plans/2026-04-07-llm-knowledge-layer-design.md)
+- [docs/plans/2026-04-07-llm-knowledge-layer.md](D:/Python/confluence_wiki/repo_clone/.worktrees/codex-confluence-wiki/docs/plans/2026-04-07-llm-knowledge-layer.md)

@@ -21,6 +21,9 @@
     <span class="eyebrow">{{ page_space_key }}</span>
     <h1>{{ page.title }}</h1>
     <div class="page-submeta">
+      {% if page_badge %}
+      <span>{{ page_badge }}</span>
+      {% endif %}
       {% if page.updated_at_remote %}
       <span>마지막 동기화 원문 시각 · {{ page.updated_at_remote }}</span>
       {% endif %}

@@ -135,6 +135,20 @@ def test_synthesis_route_renders_space_summary(tmp_path, sample_settings_dict):
     assert "핵심 문서" in response.text
 
 
+def test_knowledge_route_renders_entity_page(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    response = client.get("/spaces/DEMO/knowledge/entities/demo-home-9001")
+
+    assert response.status_code == 200
+    assert "지식 문서" in response.text
+    assert "Confluence Wiki Demo 홈" in response.text
+
+
 def test_history_route_backfills_current_version_when_snapshot_path_is_missing(tmp_path, sample_settings_dict):
     sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
     sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")

@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import or_, select
 
+from app.core.knowledge import knowledge_href, knowledge_label, normalize_knowledge_kind
 from app.core.markdown import read_markdown_body, render_markdown
-from app.db.models import Page, PageVersion, Space, WikiDocument
+from app.db.models import KnowledgeDocument, Page, PageVersion, Space, WikiDocument
 from app.graph.builder import build_graph_payload
 from app.services.sync_service import SyncService
 from app.services.wiki_qa import WikiQAService
@@ -48,6 +50,30 @@ def _history_snapshot_path(request: Request, space_key: str, slug: str, version_
     return _settings(request).wiki_root / "spaces" / space_key / "history" / slug / f"v{version_number:04d}.md"
 
 
+def _page_result_item(page: Page, space_key: str) -> dict:
+    return {
+        "title": page.title,
+        "slug": page.slug,
+        "space_key": space_key,
+        "href": f"/spaces/{space_key}/pages/{page.slug}",
+        "updated_at_label": str(page.updated_at_remote) if page.updated_at_remote else "",
+        "kind_label": "원문",
+        "sort_value": page.updated_at_remote.isoformat() if page.updated_at_remote else "",
+    }
+
+
+def _knowledge_result_item(doc: KnowledgeDocument, space_key: str) -> dict:
+    return {
+        "title": doc.title,
+        "slug": doc.slug,
+        "space_key": space_key,
+        "href": knowledge_href(space_key, doc.kind, doc.slug),
+        "updated_at_label": str(doc.updated_at),
+        "kind_label": knowledge_label(doc.kind),
+        "sort_value": doc.updated_at.isoformat(),
+    }
+
+
 def _load_graph_payload(request: Request, selected_space: str | None = None) -> dict:
     graph_path = _settings(request).wiki_root / "global" / "graph.json"
     if graph_path.exists():
@@ -70,20 +96,18 @@ async def index(request: Request, space: str | None = None) -> HTMLResponse:
     session = _session_factory(request)()
     try:
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
-        query = select(Page).order_by(Page.updated_at_remote.desc().nullslast(), Page.title)
+        query = select(Page, Space).join(Space, Space.id == Page.space_id).order_by(Page.updated_at_remote.desc().nullslast(), Page.title)
         if space and space != "all":
-            query = query.join(Space).where(Space.space_key == space)
-        page_rows = session.scalars(query.limit(20)).all()
-        space_lookup = {item.id: item.space_key for item in spaces}
-        pages = [
-            {
-                "title": page.title,
-                "slug": page.slug,
-                "space_key": space_lookup.get(page.space_id, ""),
-                "updated_at_remote": page.updated_at_remote,
-            }
-            for page in page_rows
-        ]
+            query = query.where(Space.space_key == space)
+        page_rows = session.execute(query).all()
+        knowledge_query = select(KnowledgeDocument, Space).join(Space, Space.id == KnowledgeDocument.space_id)
+        if space and space != "all":
+            knowledge_query = knowledge_query.where(Space.space_key == space)
+        knowledge_rows = session.execute(knowledge_query).all()
+        pages = [_page_result_item(page, page_space.space_key) for page, page_space in page_rows]
+        pages.extend(_knowledge_result_item(doc, doc_space.space_key) for doc, doc_space in knowledge_rows)
+        pages.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
+        pages = pages[:20]
         return _templates(request).TemplateResponse(
             request,
             "index.html",
@@ -105,6 +129,51 @@ async def index(request: Request, space: str | None = None) -> HTMLResponse:
 @router.get("/spaces/{space_key}", response_class=HTMLResponse)
 async def space_index(request: Request, space_key: str) -> HTMLResponse:
     return await index(request, space=space_key)
+
+
+@router.get("/spaces/{space_key}/knowledge/{kind}/{slug}", response_class=HTMLResponse)
+async def knowledge_view(request: Request, space_key: str, kind: str, slug: str) -> HTMLResponse:
+    session = _session_factory(request)()
+    try:
+        normalized_kind = normalize_knowledge_kind(kind)
+        doc = session.scalar(
+            select(KnowledgeDocument)
+            .join(Space, Space.id == KnowledgeDocument.space_id)
+            .where(Space.space_key == space_key, KnowledgeDocument.kind == normalized_kind, KnowledgeDocument.slug == slug)
+        )
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Knowledge page not found")
+        markdown_path = _settings(request).wiki_root / doc.markdown_path
+        body_html = render_markdown(read_markdown_body(markdown_path))
+        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        page_obj = SimpleNamespace(
+            title=doc.title,
+            prod_url=None,
+            updated_at_remote=doc.updated_at,
+            current_version=None,
+            slug=doc.slug,
+        )
+        return _templates(request).TemplateResponse(
+            request,
+            "page.html",
+            {
+                "request": request,
+                "spaces": spaces,
+                "selected_space": space_key,
+                "page": page_obj,
+                "page_space_key": space_key,
+                "body_html": body_html,
+                "page_kind": "knowledge",
+                "page_badge": knowledge_label(normalized_kind),
+                "history_versions": [],
+                "history_href": None,
+                "history_notice": None,
+                "current_page_href": None,
+                "meta_description": _meta_description(doc.summary or doc.title),
+            },
+        )
+    finally:
+        session.close()
 
 
 @router.get("/spaces/{space_key}/synthesis", response_class=HTMLResponse)
@@ -271,21 +340,25 @@ async def search(request: Request, q: str = Query(default=""), space: str | None
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
         results = []
         if q:
-            query = select(Page).join(Space)
+            query = select(Page, Space).join(Space)
             if space and space != "all":
                 query = query.where(Space.space_key == space)
             query = query.where(or_(Page.title.ilike(f"%{q}%"), Page.slug.ilike(f"%{q}%")))
-            page_rows = session.scalars(query.limit(50)).all()
-            space_lookup = {item.id: item.space_key for item in spaces}
-            results = [
-                {
-                    "title": page.title,
-                    "slug": page.slug,
-                    "space_key": space_lookup.get(page.space_id, ""),
-                    "updated_at_remote": page.updated_at_remote,
-                }
-                for page in page_rows
-            ]
+            page_rows = session.execute(query.limit(50)).all()
+            knowledge_query = select(KnowledgeDocument, Space).join(Space)
+            if space and space != "all":
+                knowledge_query = knowledge_query.where(Space.space_key == space)
+            knowledge_query = knowledge_query.where(
+                or_(
+                    KnowledgeDocument.title.ilike(f"%{q}%"),
+                    KnowledgeDocument.slug.ilike(f"%{q}%"),
+                    KnowledgeDocument.summary.ilike(f"%{q}%"),
+                )
+            )
+            knowledge_rows = session.execute(knowledge_query.limit(50)).all()
+            results = [_page_result_item(page, page_space.space_key) for page, page_space in page_rows]
+            results.extend(_knowledge_result_item(doc, doc_space.space_key) for doc, doc_space in knowledge_rows)
+            results.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
         return _templates(request).TemplateResponse(
             request,
             "index.html",
@@ -342,12 +415,31 @@ async def api_search(request: Request, q: str = Query(default=""), space: str | 
     try:
         if not q:
             return []
-        query = select(Page).join(Space)
+        query = select(Page, Space).join(Space)
         if space and space != "all":
             query = query.where(Space.space_key == space)
         query = query.where(or_(Page.title.ilike(f"%{q}%"), Page.slug.ilike(f"%{q}%")))
-        pages = session.scalars(query.limit(50)).all()
-        return [{"title": page.title, "space_key": page.space.space_key, "slug": page.slug} for page in pages]
+        page_rows = session.execute(query.limit(50)).all()
+        knowledge_query = select(KnowledgeDocument, Space).join(Space)
+        if space and space != "all":
+            knowledge_query = knowledge_query.where(Space.space_key == space)
+        knowledge_query = knowledge_query.where(
+            or_(
+                KnowledgeDocument.title.ilike(f"%{q}%"),
+                KnowledgeDocument.slug.ilike(f"%{q}%"),
+                KnowledgeDocument.summary.ilike(f"%{q}%"),
+            )
+        )
+        knowledge_rows = session.execute(knowledge_query.limit(50)).all()
+        results = [
+            {"title": page.title, "space_key": page_space.space_key, "slug": page.slug, "href": f"/spaces/{page_space.space_key}/pages/{page.slug}"}
+            for page, page_space in page_rows
+        ]
+        results.extend(
+            {"title": doc.title, "space_key": doc_space.space_key, "slug": doc.slug, "href": knowledge_href(doc_space.space_key, doc.kind, doc.slug)}
+            for doc, doc_space in knowledge_rows
+        )
+        return results
     finally:
         session.close()
 
@@ -390,6 +482,21 @@ async def api_ask(request: Request, payload: dict) -> dict:
     service = WikiQAService(settings=_settings(request))
     try:
         return service.answer(question=question, scope=scope, selected_space=selected_space)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/ask/save")
+async def api_ask_save(request: Request, payload: dict) -> dict:
+    service = WikiQAService(settings=_settings(request))
+    try:
+        return service.save_answer(
+            space_key=str(payload.get("space_key") or ""),
+            question=str(payload.get("question") or ""),
+            scope=str(payload.get("scope") or ""),
+            answer=str(payload.get("answer") or ""),
+            sources=list(payload.get("sources") or []),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -12,9 +12,10 @@ from sqlalchemy import delete, select
 
 from app.clients.confluence import ConfluenceClient
 from app.core.config import Settings, get_settings
+from app.core.knowledge import knowledge_href
 from app.core.markdown import extract_wiki_links, resolve_page_placeholders
 from app.core.slugs import page_slug
-from app.db.models import Asset, Page, PageLink, PageVersion, Space, SyncRun, WikiDocument
+from app.db.models import Asset, KnowledgeDocument, Page, PageLink, PageVersion, Space, SyncRun, WikiDocument
 from app.db.session import create_session_factory
 from app.graph.builder import build_graph_payload, write_graph_cache
 from app.llm.text_client import TextLLMClient
@@ -23,6 +24,8 @@ from app.parser.storage import storage_to_markdown
 from app.services.assets import BODY_IMAGE_PLACEHOLDER_RE, build_image_markdown, build_wiki_asset_url, is_image_filename, save_asset
 from app.services.cql import build_incremental_cql
 from app.services.index_builder import append_space_log, build_global_index, build_space_index, build_space_synthesis, read_space_log_excerpt
+from app.services.knowledge_service import KnowledgeService
+from app.services.lint_service import LintService
 from app.services.space_registry import upsert_space
 from app.services.sync_window import build_day_before_yesterday_window
 from app.services.wiki_writer import write_history_markdown, write_page_markdown
@@ -285,6 +288,8 @@ class SyncService:
                         "title": raw_page["title"],
                         "slug": raw_page["slug"],
                         "updated_at": raw_page.get("updated_at") or "",
+                        "summary": summary,
+                        "href": f"/spaces/{space_key}/pages/{raw_page['slug']}",
                     }
                 )
 
@@ -492,11 +497,18 @@ class SyncService:
         grouped_documents: dict[str, list[dict[str, str]]] = {}
         all_pages = session.scalars(select(Page)).all()
         space_lookup = {space.id: space.space_key for space in session.scalars(select(Space)).all()}
+        knowledge_service = KnowledgeService(self.settings)
+        lint_service = LintService(self.settings)
         for space_id, space_key in sorted(space_lookup.items(), key=lambda item: item[1]):
+            knowledge_service.rebuild_space_with_session(session, space_key)
+            lint_service.rebuild_space_with_session(session, space_key)
             rows = session.execute(
                 select(Page, WikiDocument)
                 .join(WikiDocument, WikiDocument.page_id == Page.id)
                 .where(Page.space_id == space_id)
+            ).all()
+            knowledge_rows = session.scalars(
+                select(KnowledgeDocument).where(KnowledgeDocument.space_id == space_id)
             ).all()
             documents = [
                 {
@@ -504,11 +516,22 @@ class SyncService:
                     "slug": page.slug,
                     "updated_at": page.updated_at_remote.isoformat() if page.updated_at_remote else "",
                     "summary": _wiki_document.summary or "",
+                    "href": f"/spaces/{space_key}/pages/{page.slug}",
                 }
                 for page, _wiki_document in rows
             ]
-            grouped_documents[space_key] = documents
-            build_space_index(self.settings.wiki_root, space_key, documents)
+            knowledge_documents = [
+                {
+                    "title": doc.title,
+                    "slug": doc.slug,
+                    "kind": doc.kind,
+                    "summary": doc.summary or "",
+                    "href": knowledge_href(space_key, doc.kind, doc.slug),
+                }
+                for doc in knowledge_rows
+            ]
+            grouped_documents[space_key] = [*documents, *knowledge_documents]
+            build_space_index(self.settings.wiki_root, space_key, documents, knowledge_documents)
             build_space_synthesis(
                 self.settings.wiki_root,
                 space_key,

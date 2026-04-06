@@ -65,3 +65,27 @@ def test_wiki_qa_excerpts_strip_markdown_and_html_noise(tmp_path, sample_setting
     assert result["sources"]
     assert "<td" not in result["sources"][0]["excerpt"]
     assert "](" not in result["sources"][0]["excerpt"]
+
+
+def test_wiki_qa_can_persist_analysis_and_reuse_it_as_source(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    service = WikiQAService(settings=settings, text_client=FakeTextClient())
+    answer = service.answer(question="운영 대시보드와 런북 요약", scope="space", selected_space="DEMO")
+
+    saved = service.save_answer(
+        space_key="DEMO",
+        question="운영 대시보드와 런북 요약",
+        scope=answer["scope"],
+        answer=answer["answer"],
+        sources=answer["sources"],
+    )
+
+    assert saved["kind"] == "analysis"
+    assert saved["href"].startswith("/spaces/DEMO/knowledge/analyses/")
+
+    follow_up = service.answer(question="대시보드와 런북 요약 분석 문서", scope="space", selected_space="DEMO")
+    assert any(source["kind"] == "analysis" for source in follow_up["sources"])

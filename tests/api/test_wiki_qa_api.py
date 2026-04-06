@@ -54,3 +54,39 @@ def test_wiki_qa_api_rejects_space_scope_without_specific_space(tmp_path, sample
     )
 
     assert response.status_code == 400
+
+
+def test_wiki_qa_api_can_save_answer_as_analysis_page(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    ask_response = client.post(
+        "/api/ask",
+        json={"question": "운영 대시보드와 런북 차이를 정리해줘", "scope": "space", "selected_space": "DEMO"},
+    )
+
+    assert ask_response.status_code == 200
+    payload = ask_response.json()
+
+    save_response = client.post(
+        "/api/ask/save",
+        json={
+            "space_key": "DEMO",
+            "question": "운영 대시보드와 런북 차이를 정리해줘",
+            "scope": payload["scope"],
+            "answer": payload["answer"],
+            "sources": payload["sources"],
+        },
+    )
+
+    assert save_response.status_code == 200
+    saved = save_response.json()
+    assert saved["href"].startswith("/spaces/DEMO/knowledge/analyses/")
+
+    analysis_page = client.get(saved["href"])
+    assert analysis_page.status_code == 200
+    assert "분석 문서" in analysis_page.text
+    assert "운영 대시보드와 런북 차이" in analysis_page.text

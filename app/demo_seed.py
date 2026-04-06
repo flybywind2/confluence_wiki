@@ -8,10 +8,13 @@ from pathlib import Path
 from sqlalchemy import delete, select
 
 from app.core.config import Settings, get_settings
-from app.db.models import Asset, Page, PageLink, PageVersion, WikiDocument
+from app.core.knowledge import knowledge_href
+from app.db.models import Asset, KnowledgeDocument, Page, PageLink, PageVersion, WikiDocument
 from app.db.session import create_session_factory
 from app.graph.builder import build_graph_payload, write_graph_cache
 from app.services.index_builder import append_space_log, build_global_index, build_space_index, build_space_synthesis, read_space_log_excerpt
+from app.services.knowledge_service import KnowledgeService
+from app.services.lint_service import LintService
 from app.services.space_registry import upsert_space
 from app.services.wiki_writer import write_history_markdown, write_page_markdown
 
@@ -99,6 +102,8 @@ def seed_demo_content(settings: Settings | None = None) -> dict[str, int]:
     settings.cache_root.mkdir(parents=True, exist_ok=True)
 
     try:
+        knowledge_service = KnowledgeService(settings)
+        lint_service = LintService(settings)
         spaces_by_key = {}
         for space_key, metadata in SPACES.items():
             spaces_by_key[space_key] = upsert_space(
@@ -219,6 +224,8 @@ def seed_demo_content(settings: Settings | None = None) -> dict[str, int]:
                     "title": page_def["title"],
                     "slug": page_def["slug"],
                     "updated_at": page_def["updated_at"],
+                    "summary": _summary(body),
+                    "href": f"/spaces/{page_def['space_key']}/pages/{page_def['slug']}",
                 }
             )
 
@@ -255,7 +262,22 @@ def seed_demo_content(settings: Settings | None = None) -> dict[str, int]:
                 graph_edges.append({"source": source_page.id, "target": target_page.id, "link_type": "wiki"})
 
         for space_key, docs in documents_by_space.items():
-            build_space_index(settings.wiki_root, space_key, docs)
+            knowledge_service.rebuild_space_with_session(session, space_key)
+            lint_service.rebuild_space_with_session(session, space_key)
+            knowledge_rows = session.scalars(
+                select(KnowledgeDocument).where(KnowledgeDocument.space_id == spaces_by_key[space_key].id)
+            ).all()
+            knowledge_docs = [
+                {
+                    "title": doc.title,
+                    "slug": doc.slug,
+                    "kind": doc.kind,
+                    "summary": doc.summary or "",
+                    "href": knowledge_href(space_key, doc.kind, doc.slug),
+                }
+                for doc in knowledge_rows
+            ]
+            build_space_index(settings.wiki_root, space_key, docs, knowledge_docs)
             append_space_log(settings.wiki_root, space_key, "demo-seed", datetime.now(), docs)
             build_space_synthesis(
                 settings.wiki_root,
@@ -264,7 +286,30 @@ def seed_demo_content(settings: Settings | None = None) -> dict[str, int]:
                 generated_at=datetime.now(),
                 recent_log_entries=read_space_log_excerpt(settings.wiki_root, space_key),
             )
-        build_global_index(settings.wiki_root, documents_by_space)
+        grouped_documents = {}
+        for space_key, docs in documents_by_space.items():
+            knowledge_rows = session.scalars(
+                select(KnowledgeDocument).where(KnowledgeDocument.space_id == spaces_by_key[space_key].id)
+            ).all()
+            grouped_documents[space_key] = [
+                *[
+                    {
+                        **doc,
+                        "href": f"/spaces/{space_key}/pages/{doc['slug']}",
+                    }
+                    for doc in docs
+                ],
+                *[
+                    {
+                        "title": doc.title,
+                        "slug": doc.slug,
+                        "summary": doc.summary or "",
+                        "href": knowledge_href(space_key, doc.kind, doc.slug),
+                    }
+                    for doc in knowledge_rows
+                ],
+            ]
+        build_global_index(settings.wiki_root, grouped_documents)
 
         graph_nodes = [
             {

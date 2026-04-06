@@ -4,6 +4,8 @@ from pathlib import Path
 
 import yaml
 
+from app.core.knowledge import knowledge_segment
+
 
 def frontmatter_to_yaml(frontmatter: dict) -> str:
     rendered = yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
@@ -33,4 +35,9 @@ def write_space_document(root: Path, space_key: str, filename: str, body: str, f
     space_dir = root / "spaces" / space_key
     path = space_dir / filename
     return write_markdown_file(path, frontmatter, body)
-    return path
+
+
+def write_knowledge_markdown(root: Path, space_key: str, kind: str, slug: str, frontmatter: dict, body: str) -> Path:
+    knowledge_dir = root / "spaces" / space_key / "knowledge" / knowledge_segment(kind)
+    path = knowledge_dir / f"{slug}.md"
+    return write_markdown_file(path, frontmatter, body)

@@ -44,6 +44,27 @@ def test_demo_seed_populates_pages_assets_and_graph(tmp_path, sample_settings_di
     assert synthesis_file.exists()
     assert "DEMO Synthesis" in synthesis_file.read_text(encoding="utf-8")
 
+    entity_file = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "entities" / "demo-home-9001.md"
+    concept_file = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "concepts" / "core-topics.md"
+    lint_file = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "lint" / "report.md"
+    assert entity_file.exists()
+    assert concept_file.exists()
+    assert lint_file.exists()
+
+    knowledge_page = client.get("/spaces/DEMO/knowledge/entities/demo-home-9001")
+    assert knowledge_page.status_code == 200
+    assert "지식 문서" in knowledge_page.text
+
+    lint_page = client.get("/spaces/DEMO/knowledge/lint/report")
+    assert lint_page.status_code == 200
+    assert "Lint Report" in lint_page.text
+
+    index_text = (tmp_path / "wiki" / "spaces" / "DEMO" / "index.md").read_text(encoding="utf-8")
+    assert "## Entities" in index_text
+    assert "## Concepts" in index_text
+    assert "## Lint" in index_text
+    assert "Confluence Wiki Demo 홈" in index_text
+
     graph = client.get("/api/graph")
     assert graph.status_code == 200
     payload = graph.json()

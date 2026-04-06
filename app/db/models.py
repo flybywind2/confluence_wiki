@@ -26,6 +26,7 @@ class Space(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     pages: Mapped[list["Page"]] = relationship(back_populates="space")
+    knowledge_documents: Mapped[list["KnowledgeDocument"]] = relationship(back_populates="space")
 
 
 class Page(Base):
@@ -131,3 +132,20 @@ class WikiDocument(Base):
     rendered_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     page: Mapped[Page] = relationship(back_populates="documents")
+
+
+class KnowledgeDocument(Base):
+    __tablename__ = "knowledge_documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    slug: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    markdown_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_refs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    space: Mapped[Space] = relationship(back_populates="knowledge_documents")

@@ -1,0 +1,357 @@
+from __future__ import annotations
+
+from collections import Counter
+from datetime import datetime
+import re
+import uuid
+
+from sqlalchemy import delete, select
+
+from app.core.config import Settings, get_settings
+from app.core.knowledge import knowledge_href, normalize_knowledge_kind
+from app.core.markdown import read_markdown_body
+from app.core.slugs import page_slug
+from app.db.models import KnowledgeDocument, Page, PageLink, Space, WikiDocument
+from app.db.session import create_session_factory
+from app.services.index_builder import append_space_log, build_global_index, build_space_index
+from app.services.wiki_writer import write_knowledge_markdown
+
+TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+STOPWORDS = {
+    "위키",
+    "문서",
+    "페이지",
+    "설명",
+    "정리",
+    "현재",
+    "space",
+    "demo",
+    "arch",
+}
+
+
+class KnowledgeService:
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
+        self.session_factory = create_session_factory(self.settings.database_url)
+
+    def rebuild_space(self, space_key: str) -> list[KnowledgeDocument]:
+        session = self.session_factory()
+        try:
+            docs = self.rebuild_space_with_session(session, space_key)
+            session.commit()
+            return docs
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def rebuild_space_with_session(self, session, space_key: str) -> list[KnowledgeDocument]:
+        space = session.scalar(select(Space).where(Space.space_key == space_key))
+        if space is None:
+            return []
+
+        session.execute(
+            delete(KnowledgeDocument).where(
+                KnowledgeDocument.space_id == space.id,
+                KnowledgeDocument.kind.in_(["entity", "concept"]),
+            )
+        )
+        session.flush()
+
+        page_rows = session.execute(
+            select(Page, WikiDocument).join(WikiDocument, WikiDocument.page_id == Page.id).where(Page.space_id == space.id)
+        ).all()
+        inbound_link_counts = Counter(
+            target_id for target_id in session.scalars(select(PageLink.target_page_id)).all() if target_id is not None
+        )
+        docs: list[KnowledgeDocument] = []
+
+        for page, wiki_document in page_rows:
+            markdown_path = self.settings.wiki_root / wiki_document.markdown_path
+            body = read_markdown_body(markdown_path) if markdown_path.exists() else ""
+            summary = wiki_document.summary or self._first_line(body)
+            entity_body = "\n".join(
+                [
+                    f"# {page.title}",
+                    "",
+                    "이 문서는 Confluence 원문 페이지를 기반으로 정리한 지식 문서입니다.",
+                    "",
+                    "## 원문",
+                    "",
+                    f"- 최신 문서: [원문 문서](/spaces/{space_key}/pages/{page.slug})",
+                    f"- 운영 URL: {page.prod_url}",
+                    "",
+                    "## 요약",
+                    "",
+                    summary or "요약 없음",
+                    "",
+                    "## 상태",
+                    "",
+                    f"- 현재 버전: {page.current_version}",
+                    f"- inbound links: {inbound_link_counts.get(page.id, 0)}",
+                ]
+            )
+            docs.append(
+                self._upsert_document(
+                    session=session,
+                    space=space,
+                    kind="entity",
+                    slug=page.slug,
+                    title=page.title,
+                    summary=summary or f"{page.title} 지식 문서",
+                    body=entity_body,
+                    source_refs=f"/spaces/{space_key}/pages/{page.slug}",
+                )
+            )
+
+        concept_body = self._build_core_topics_body(space_key, page_rows)
+        docs.append(
+            self._upsert_document(
+                session=session,
+                space=space,
+                kind="concept",
+                slug="core-topics",
+                title=f"{space_key} 핵심 개념",
+                summary=f"{space_key} space의 주요 주제와 연결을 정리한 개념 문서",
+                body=concept_body,
+                source_refs="\n".join(f"/spaces/{space_key}/pages/{page.slug}" for page, _ in page_rows),
+            )
+        )
+        return docs
+
+    def save_analysis(
+        self,
+        space_key: str,
+        question: str,
+        scope: str,
+        answer: str,
+        sources: list[dict[str, str]],
+    ) -> dict[str, str]:
+        session = self.session_factory()
+        try:
+            result = self.save_analysis_with_session(session, space_key, question, scope, answer, sources)
+            session.commit()
+            return result
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def save_analysis_with_session(
+        self,
+        session,
+        space_key: str,
+        question: str,
+        scope: str,
+        answer: str,
+        sources: list[dict[str, str]],
+    ) -> dict[str, str]:
+        space = session.scalar(select(Space).where(Space.space_key == space_key))
+        if space is None:
+            raise ValueError("unknown space")
+        if not question.strip():
+            raise ValueError("question is required")
+        if not answer.strip():
+            raise ValueError("answer is required")
+        saved_at = datetime.now()
+        suffix = uuid.uuid4().hex[:8]
+        slug = page_slug(question[:40], suffix)
+        title = f"분석: {question[:50]}"
+        source_links = [f"- [{item['title']}]({self._source_href(item)})" for item in sources]
+        body = "\n".join(
+            [
+                f"# {title}",
+                "",
+                "이 문서는 assistant 질문 결과를 위키에 저장한 분석 문서입니다.",
+                "",
+                "## 질문",
+                "",
+                question,
+                "",
+                "## 범위",
+                "",
+                scope,
+                "",
+                "## 저장 시각",
+                "",
+                saved_at.isoformat(),
+                "",
+                "## 답변",
+                "",
+                answer,
+                "",
+                "## 참고 문서",
+                "",
+                *source_links,
+            ]
+        )
+        doc = self._upsert_document(
+            session=session,
+            space=space,
+            kind="analysis",
+            slug=slug,
+            title=title,
+            summary=answer.splitlines()[0][:180] if answer else question[:180],
+            body=body,
+            source_refs="\n".join(self._source_href(item) for item in sources),
+        )
+        self._rebuild_indexes_for_space(session, space)
+        append_space_log(
+            self.settings.wiki_root,
+            space.space_key,
+            "analysis-save",
+            saved_at,
+            [{"title": doc.title, "slug": doc.slug, "kind": doc.kind, "href": knowledge_href(space.space_key, doc.kind, doc.slug)}],
+        )
+        return {
+            "kind": doc.kind,
+            "slug": doc.slug,
+            "title": doc.title,
+            "href": knowledge_href(space_key, doc.kind, doc.slug),
+        }
+
+    def list_documents(self, session, space_id: int) -> list[KnowledgeDocument]:
+        return session.scalars(
+            select(KnowledgeDocument).where(KnowledgeDocument.space_id == space_id).order_by(KnowledgeDocument.updated_at.desc())
+        ).all()
+
+    def _rebuild_indexes_for_space(self, session, space: Space) -> None:
+        page_rows = session.execute(
+            select(Page, WikiDocument).join(WikiDocument, WikiDocument.page_id == Page.id).where(Page.space_id == space.id)
+        ).all()
+        page_docs = [
+            {
+                "title": page.title,
+                "slug": page.slug,
+                "summary": wiki_document.summary or page.title,
+                "href": f"/spaces/{space.space_key}/pages/{page.slug}",
+            }
+            for page, wiki_document in page_rows
+        ]
+        knowledge_docs = [
+            {
+                "title": doc.title,
+                "slug": doc.slug,
+                "kind": doc.kind,
+                "summary": doc.summary or doc.title,
+                "href": knowledge_href(space.space_key, doc.kind, doc.slug),
+            }
+            for doc in self.list_documents(session, space.id)
+        ]
+        build_space_index(self.settings.wiki_root, space.space_key, page_docs, knowledge_docs)
+
+        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        grouped_documents: dict[str, list[dict[str, str]]] = {}
+        for current_space in spaces:
+            current_page_rows = session.execute(
+                select(Page, WikiDocument).join(WikiDocument, WikiDocument.page_id == Page.id).where(Page.space_id == current_space.id)
+            ).all()
+            grouped_documents[current_space.space_key] = [
+                *[
+                    {
+                        "title": page.title,
+                        "slug": page.slug,
+                        "summary": wiki_document.summary or page.title,
+                        "href": f"/spaces/{current_space.space_key}/pages/{page.slug}",
+                    }
+                    for page, wiki_document in current_page_rows
+                ],
+                *[
+                    {
+                        "title": doc.title,
+                        "slug": doc.slug,
+                        "summary": doc.summary or doc.title,
+                        "href": knowledge_href(current_space.space_key, doc.kind, doc.slug),
+                    }
+                    for doc in self.list_documents(session, current_space.id)
+                ],
+            ]
+        build_global_index(self.settings.wiki_root, grouped_documents)
+
+    def _upsert_document(
+        self,
+        session,
+        space: Space,
+        kind: str,
+        slug: str,
+        title: str,
+        summary: str,
+        body: str,
+        source_refs: str | None,
+    ) -> KnowledgeDocument:
+        normalized_kind = normalize_knowledge_kind(kind)
+        frontmatter = {
+            "space_key": space.space_key,
+            "kind": normalized_kind,
+            "slug": slug,
+            "title": title,
+            "source_refs": source_refs or "",
+            "updated_at": datetime.now().isoformat(),
+        }
+        markdown_path = write_knowledge_markdown(
+            root=self.settings.wiki_root,
+            space_key=space.space_key,
+            kind=normalized_kind,
+            slug=slug,
+            frontmatter=frontmatter,
+            body=body,
+        )
+        doc = session.scalar(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.space_id == space.id,
+                KnowledgeDocument.kind == normalized_kind,
+                KnowledgeDocument.slug == slug,
+            )
+        )
+        if doc is None:
+            doc = KnowledgeDocument(space_id=space.id, kind=normalized_kind, slug=slug, title=title, markdown_path="")
+            session.add(doc)
+        doc.kind = normalized_kind
+        doc.title = title
+        doc.markdown_path = markdown_path.relative_to(self.settings.wiki_root).as_posix()
+        doc.summary = summary
+        doc.source_refs = source_refs
+        session.flush()
+        return doc
+
+    @staticmethod
+    def _first_line(body: str) -> str:
+        for line in body.splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped[:180]
+        return ""
+
+    def _build_core_topics_body(self, space_key: str, page_rows: list[tuple[Page, WikiDocument]]) -> str:
+        summaries = [wiki_document.summary or page.title for page, wiki_document in page_rows]
+        tokens = [
+            token.lower()
+            for summary in summaries
+            for token in TOKEN_RE.findall(summary)
+            if token.lower() not in STOPWORDS
+        ]
+        top_terms = [token for token, _count in Counter(tokens).most_common(6)]
+        lines = [f"# {space_key} 핵심 개념", "", "이 문서는 현재 space의 주요 주제와 연결을 정리한 개념 문서입니다.", "", "## 주요 문서", ""]
+        for page, wiki_document in sorted(page_rows, key=lambda item: item[0].title.lower()):
+            lines.append(f"- [{page.title}](/spaces/{space_key}/pages/{page.slug}): {wiki_document.summary or page.title}")
+        lines.extend(["", "## 핵심 키워드", ""])
+        if top_terms:
+            lines.extend(f"- {term}" for term in top_terms)
+        else:
+            lines.append("- 키워드 추출 결과가 부족합니다.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _source_href(item: dict[str, str]) -> str:
+        href = str(item.get("href") or "").strip()
+        if href:
+            return href
+        space_key = str(item.get("space_key") or "").strip()
+        slug = str(item.get("slug") or "").strip()
+        kind = normalize_knowledge_kind(str(item.get("kind") or "page"))
+        if kind == "page":
+            return f"/spaces/{space_key}/pages/{slug}"
+        return knowledge_href(space_key, kind, slug)

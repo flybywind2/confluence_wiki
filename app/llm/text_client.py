@@ -50,7 +50,9 @@ class TextLLMClient:
                     [
                         f"문서 제목: {item['title']}",
                         f"Space: {item['space_key']}",
-                        f"문서 경로: /spaces/{item['space_key']}/pages/{item['slug']}",
+                        f"문서 종류: {item.get('kind', 'page')}",
+                        "문서 경로: "
+                        + (item.get("href") or f"/spaces/{item['space_key']}/pages/{item['slug']}"),
                         f"발췌: {item['excerpt']}",
                     ]
                 )

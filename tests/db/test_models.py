@@ -9,5 +9,6 @@ def test_metadata_contains_core_tables():
 
     assert "spaces" in Base.metadata.tables
     assert "pages" in Base.metadata.tables
+    assert "knowledge_documents" in Base.metadata.tables
     assert "page_links" in Base.metadata.tables
     assert "sync_runs" in Base.metadata.tables

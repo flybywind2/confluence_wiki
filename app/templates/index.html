@@ -32,8 +32,8 @@
   <ul class="page-list">
     {% for page in pages %}
     <li>
-      <a href="/spaces/{{ page.space_key }}/pages/{{ page.slug }}">{{ page.title }}</a>
-      <span class="page-meta">{{ page.space_key }}{% if page.updated_at_remote %} · {{ page.updated_at_remote }}{% endif %}</span>
+      <a href="{{ page.href }}">{{ page.title }}</a>
+      <span class="page-meta">{{ page.space_key }}{% if page.kind_label %} · {{ page.kind_label }}{% endif %}{% if page.updated_at_label %} · {{ page.updated_at_label }}{% endif %}</span>
     </li>
     {% endfor %}
   </ul>
