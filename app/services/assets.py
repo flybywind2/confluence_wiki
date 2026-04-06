@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -47,5 +47,5 @@ def asset_metadata(path: Path, is_image: bool, caption: str | None) -> dict[str,
         "local_path": str(path),
         "is_image": is_image,
         "vlm_summary": caption,
-        "downloaded_at": datetime.now(UTC).replace(tzinfo=None),
+        "downloaded_at": datetime.now(timezone.utc).replace(tzinfo=None),
     }

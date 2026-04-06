@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from zoneinfo import ZoneInfo
@@ -68,7 +68,7 @@ class SyncService:
 
     @staticmethod
     def _utcnow() -> datetime:
-        return datetime.now(UTC).replace(tzinfo=None)
+        return datetime.now(timezone.utc).replace(tzinfo=None)
 
     def run_bootstrap(self, space_key: str, root_page_id: str) -> SyncResult:
         return asyncio.run(self.run_bootstrap_async(space_key, root_page_id))
