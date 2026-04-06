@@ -59,6 +59,14 @@ python -m app.cli bootstrap --space DEMO --page-id 123456
 python -m app.cli sync --space DEMO
 ```
 
+데모 시드:
+
+```bash
+python -m app.demo_seed
+```
+
+샘플 markdown 원본은 `data/demo_seed/pages/` 아래에 있고, 시드 실행 시 `WIKI_ROOT`와 DB 메타데이터가 함께 채워집니다.
+
 ## 관리자 API
 
 외부 스케줄러가 직접 호출할 경우:

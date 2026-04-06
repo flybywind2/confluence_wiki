@@ -7,7 +7,9 @@ __pycache__/
 htmlcov/
 dist/
 build/
-data/
+data/*
+!data/demo_seed/
+!data/demo_seed/**
 .env
 .worktrees/
 .runtime/
