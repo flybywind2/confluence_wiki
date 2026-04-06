@@ -12,6 +12,7 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 - 복잡한 표는 HTML fallback
 - 이미지 로컬 저장 + VLM 기반 한국어 설명
 - Obsidian 스타일 graph view
+- 우측 하단 플로팅 버튼 기반 Wiki Q&A 모달
 - 외부 스케줄러용 CLI / 관리자 API
 
 ## 환경 변수

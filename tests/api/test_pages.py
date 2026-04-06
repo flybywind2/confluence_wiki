@@ -10,6 +10,7 @@ def test_index_page_renders_space_selector():
 
     assert response.status_code == 200
     assert "space" in response.text.lower()
+    assert "위키에게 묻기" in response.text
 
 
 def test_wiki_static_route_serves_space_assets(tmp_path, sample_settings_dict):

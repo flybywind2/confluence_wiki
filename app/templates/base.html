@@ -6,7 +6,7 @@
     <title>{% block title %}Confluence Wiki{% endblock %}</title>
     <link rel="stylesheet" href="/static/app.css" />
   </head>
-  <body>
+  <body data-selected-space="{{ selected_space or 'all' }}">
     <div class="page-shell">
       <aside class="sidebar">
         <a class="brand" href="/">Confluence Wiki</a>
@@ -34,5 +34,65 @@
         {% block content %}{% endblock %}
       </main>
     </div>
+    <button
+      type="button"
+      class="assistant-fab"
+      id="assistant-fab"
+      aria-label="위키에게 묻기"
+      aria-controls="assistant-modal"
+      aria-expanded="false"
+    >
+      위키에게 묻기
+    </button>
+    <div class="assistant-modal-backdrop" id="assistant-backdrop" hidden></div>
+    <section
+      class="assistant-modal"
+      id="assistant-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="assistant-title"
+      hidden
+    >
+      <header class="assistant-modal-header">
+        <div>
+          <div class="eyebrow">Wiki Assistant</div>
+          <h2 id="assistant-title">문서 기반 질문</h2>
+        </div>
+        <button type="button" class="assistant-close" id="assistant-close" aria-label="닫기">×</button>
+      </header>
+      <div class="assistant-controls">
+        <label class="assistant-scope">
+          <input
+            type="radio"
+            name="assistant-scope"
+            value="space"
+            {% if selected_space == 'all' %}disabled{% else %}checked{% endif %}
+          />
+          현재 선택된 Space
+        </label>
+        <label class="assistant-scope">
+          <input
+            type="radio"
+            name="assistant-scope"
+            value="global"
+            {% if selected_space == 'all' %}checked{% endif %}
+          />
+          전체 위키
+        </label>
+      </div>
+      <div class="assistant-thread" id="assistant-thread">
+        <div class="assistant-empty">
+          현재 화면의 위키를 기준으로 질문할 수 있습니다. 답변에는 참고한 문서 링크가 함께 표시됩니다.
+        </div>
+      </div>
+      <form class="assistant-form" id="assistant-form">
+        <textarea id="assistant-question" rows="4" placeholder="예: 운영 대시보드 문서가 설명하는 핵심 지표는 뭐야?"></textarea>
+        <div class="assistant-form-footer">
+          <span class="assistant-status" id="assistant-status"></span>
+          <button type="submit" class="assistant-submit">질문하기</button>
+        </div>
+      </form>
+    </section>
+    <script src="/static/wiki-assistant.js"></script>
   </body>
 </html>

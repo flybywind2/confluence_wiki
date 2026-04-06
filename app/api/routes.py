@@ -12,6 +12,7 @@ from app.core.markdown import read_markdown_body, render_markdown
 from app.db.models import Page, Space, WikiDocument
 from app.graph.builder import build_graph_payload
 from app.services.sync_service import SyncService
+from app.services.wiki_qa import WikiQAService
 
 router = APIRouter()
 
@@ -225,6 +226,18 @@ async def api_page(request: Request, space_key: str, slug: str) -> dict:
         }
     finally:
         session.close()
+
+
+@router.post("/api/ask")
+async def api_ask(request: Request, payload: dict) -> dict:
+    question = str(payload.get("question") or "").strip()
+    scope = str(payload.get("scope") or "space").strip()
+    selected_space = payload.get("selected_space")
+    service = WikiQAService(settings=_settings(request))
+    try:
+        return service.answer(question=question, scope=scope, selected_space=selected_space)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/admin/bootstrap")
