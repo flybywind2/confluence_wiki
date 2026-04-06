@@ -7,9 +7,10 @@
   const questionInput = document.getElementById("assistant-question");
   const thread = document.getElementById("assistant-thread");
   const status = document.getElementById("assistant-status");
+  const submitButton = form.querySelector(".assistant-submit");
   const selectedSpace = document.body.dataset.selectedSpace || "all";
 
-  if (!fab || !modal || !backdrop || !form || !questionInput || !thread || !status) return;
+  if (!fab || !modal || !backdrop || !form || !questionInput || !thread || !status || !submitButton) return;
 
   const openModal = () => {
     modal.hidden = false;
@@ -73,6 +74,12 @@
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !modal.hidden) closeModal();
   });
+  questionInput.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  });
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -86,6 +93,7 @@
     const selectedScopeInput = document.querySelector('input[name="assistant-scope"]:checked');
     const scope = selectedScopeInput ? selectedScopeInput.value : "global";
     status.textContent = "답변을 생성하는 중입니다...";
+    submitButton.disabled = true;
     appendQuestion(question);
     questionInput.value = "";
     thread.querySelector(".assistant-empty")?.remove();
@@ -109,6 +117,9 @@
     } catch (error) {
       appendAnswer({ answer: error.message || "질문 처리 중 오류가 발생했습니다.", sources: [] });
       status.textContent = "오류가 발생했습니다.";
+    } finally {
+      submitButton.disabled = false;
+      questionInput.focus();
     }
   });
 })();

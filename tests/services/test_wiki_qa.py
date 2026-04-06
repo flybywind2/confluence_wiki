@@ -51,3 +51,17 @@ def test_wiki_qa_requires_concrete_space_for_space_scope(tmp_path, sample_settin
 
     with pytest.raises(ValueError):
         service.answer(question="질문", scope="space", selected_space="all")
+
+
+def test_wiki_qa_excerpts_strip_markdown_and_html_noise(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    service = WikiQAService(settings=settings, text_client=FakeTextClient())
+    result = service.answer(question="이미지와 graph cache는 어디에서 서빙돼?", scope="global", selected_space="DEMO")
+
+    assert result["sources"]
+    assert "<td" not in result["sources"][0]["excerpt"]
+    assert "](" not in result["sources"][0]["excerpt"]

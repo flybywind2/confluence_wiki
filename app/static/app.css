@@ -78,6 +78,26 @@ body {
 .page-list a:hover, .source-link:hover { color: var(--accent); }
 .section-header, .page-header { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; }
 .page-header { align-items: start; flex-direction: column; }
+.page-breadcrumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 18px;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+.page-breadcrumbs a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 700;
+}
+.page-submeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  color: var(--muted);
+}
 .page-actions { display: flex; gap: 12px; }
 .source-link {
   display: inline-flex;

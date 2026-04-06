@@ -29,6 +29,11 @@ def _settings(request: Request):
     return request.app.state.settings
 
 
+def _meta_description(text: str, fallback: str = "Confluence mirror에서 동기화한 markdown wiki를 읽기 중심 UI로 제공합니다.") -> str:
+    compact = " ".join(str(text or "").split()).strip()
+    return (compact or fallback)[:180]
+
+
 def _load_graph_payload(request: Request, selected_space: str | None = None) -> dict:
     graph_path = _settings(request).wiki_root / "global" / "graph.json"
     if graph_path.exists():
@@ -73,6 +78,9 @@ async def index(request: Request, space: str | None = None) -> HTMLResponse:
                 "spaces": spaces,
                 "selected_space": space or "all",
                 "pages": pages,
+                "meta_description": _meta_description(
+                    f"{(space or '전체')} space 문서 홈입니다. 최근 문서 {len(pages)}건을 표시합니다."
+                ),
             },
         )
     finally:
@@ -111,6 +119,7 @@ async def page_view(request: Request, space_key: str, slug: str) -> HTMLResponse
                 "page": page,
                 "page_space_key": space_key,
                 "body_html": body_html,
+                "meta_description": _meta_description(wiki_document.summary or page.title),
             },
         )
     finally:
@@ -148,6 +157,9 @@ async def search(request: Request, q: str = Query(default=""), space: str | None
                 "selected_space": space or "all",
                 "pages": results,
                 "search_query": q,
+                "meta_description": _meta_description(
+                    f"검색어 {q} 에 대한 결과 {len(results)}건입니다. 범위는 {(space or '전체 위키')} 입니다."
+                ),
             },
         )
     finally:
@@ -166,6 +178,9 @@ async def graph_page(request: Request, space: str | None = None) -> HTMLResponse
                 "request": request,
                 "spaces": spaces,
                 "selected_space": space or "all",
+                "meta_description": _meta_description(
+                    f"{(space or '전체')} 범위 문서 연결 그래프를 표시합니다."
+                ),
             },
         )
     finally:

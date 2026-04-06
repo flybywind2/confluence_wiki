@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from bs4 import BeautifulSoup
 from sqlalchemy import select
 
 from app.core.config import Settings, get_settings
@@ -124,6 +125,7 @@ class WikiQAService:
     def _excerpt(body: str, tokens: list[str], limit: int = 500) -> str:
         compact = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1 이미지", body)
         compact = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", compact)
+        compact = BeautifulSoup(compact, "html.parser").get_text(" ")
         compact = re.sub(r"[#`>*-]+", " ", compact)
         compact = re.sub(r"\s+", " ", compact).strip()
         if not compact:

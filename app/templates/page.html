@@ -2,11 +2,23 @@
 {% block title %}{{ page.title }}{% endblock %}
 {% block content %}
 <article class="page-card">
+  <nav class="page-breadcrumbs" aria-label="breadcrumb">
+    <a href="/">전체</a>
+    <span>/</span>
+    <a href="/spaces/{{ page_space_key }}">{{ page_space_key }}</a>
+    <span>/</span>
+    <span>{{ page.title }}</span>
+  </nav>
   <header class="page-header">
     <span class="eyebrow">{{ page_space_key }}</span>
     <h1>{{ page.title }}</h1>
-    <div class="page-actions">
-      <a class="source-link" href="{{ page.prod_url }}" target="_blank" rel="noreferrer">원문 보기</a>
+    <div class="page-submeta">
+      {% if page.updated_at_remote %}
+      <span>마지막 동기화 원문 시각 · {{ page.updated_at_remote }}</span>
+      {% endif %}
+      <div class="page-actions">
+        <a class="source-link" href="{{ page.prod_url }}" target="_blank" rel="noreferrer">원문 보기</a>
+      </div>
     </div>
   </header>
   <section class="wiki-body">{{ body_html | safe }}</section>

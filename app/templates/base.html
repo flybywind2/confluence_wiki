@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{% block title %}Confluence Wiki{% endblock %}</title>
+    <meta name="description" content="{{ meta_description or 'Confluence mirror에서 동기화한 markdown wiki를 읽기 중심 UI로 제공합니다.' }}" />
     <link rel="stylesheet" href="/static/app.css" />
   </head>
   <body data-selected-space="{{ selected_space or 'all' }}">
