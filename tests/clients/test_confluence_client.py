@@ -1,3 +1,5 @@
+import pytest
+
 from app.clients.confluence import ConfluenceClient
 from app.core.config import Settings
 
@@ -29,3 +31,30 @@ def test_normalize_page_payload_extracts_parent_from_ancestors(sample_settings_d
     normalized = client._normalize_page_payload(payload)
 
     assert normalized["parent_id"] == "200"
+
+
+class _DummyResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+@pytest.mark.asyncio
+async def test_search_cql_follows_pagination(sample_settings_dict, monkeypatch):
+    settings = Settings.model_validate(sample_settings_dict)
+    client = ConfluenceClient(settings)
+    payloads = [
+        {"results": [{"id": "1"}], "_links": {"next": "/rest/api/content/search?start=1"}},
+        {"results": [{"id": "2"}], "_links": {}},
+    ]
+
+    async def fake_request(method, path, **kwargs):
+        return _DummyResponse(payloads.pop(0))
+
+    monkeypatch.setattr(client, "_request", fake_request)
+
+    results = await client.search_cql("DEMO", 'space="DEMO"')
+
+    assert [item["id"] for item in results] == ["1", "2"]

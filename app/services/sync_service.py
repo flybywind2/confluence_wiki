@@ -66,10 +66,16 @@ class SyncService:
         return datetime.now(UTC).replace(tzinfo=None)
 
     def run_bootstrap(self, space_key: str, root_page_id: str) -> SyncResult:
-        return asyncio.run(self._run_bootstrap(space_key, root_page_id))
+        return asyncio.run(self.run_bootstrap_async(space_key, root_page_id))
 
     def run_incremental(self, space_key: str, now: datetime | None = None) -> SyncResult:
-        return asyncio.run(self._run_incremental(space_key, now))
+        return asyncio.run(self.run_incremental_async(space_key, now))
+
+    async def run_bootstrap_async(self, space_key: str, root_page_id: str) -> SyncResult:
+        return await self._run_bootstrap(space_key, root_page_id)
+
+    async def run_incremental_async(self, space_key: str, now: datetime | None = None) -> SyncResult:
+        return await self._run_incremental(space_key, now)
 
     async def _run_bootstrap(self, space_key: str, root_page_id: str) -> SyncResult:
         descendants = await self.confluence_client.fetch_descendant_pages(root_page_id)
@@ -102,6 +108,7 @@ class SyncService:
             session.flush()
 
             existing_pages = session.scalars(select(Page).where(Page.space_id == space.id)).all()
+            existing_pages_by_confluence_id = {page.confluence_page_id: page for page in existing_pages}
             slug_lookup: dict[str, tuple[str, str]] = {
                 page.confluence_page_id: (space_key, page.slug) for page in existing_pages
             }
@@ -110,7 +117,8 @@ class SyncService:
             for page_id in unique_page_ids:
                 raw_page = await self.confluence_client.fetch_page(page_id)
                 raw_page["space_key"] = raw_page.get("space_key") or space_key
-                raw_page["slug"] = page_slug(raw_page["title"], raw_page["id"])
+                existing_page = existing_pages_by_confluence_id.get(raw_page["id"])
+                raw_page["slug"] = existing_page.slug if existing_page is not None else page_slug(raw_page["title"], raw_page["id"])
                 raw_pages.append(raw_page)
                 slug_lookup[raw_page["id"]] = (space_key, raw_page["slug"])
 

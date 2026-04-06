@@ -236,7 +236,7 @@ async def admin_bootstrap(
     if x_admin_token != _settings(request).sync_admin_token:
         raise HTTPException(status_code=401, detail="Invalid admin token")
     service = SyncService(settings=_settings(request))
-    result = service.run_bootstrap(space_key=payload["space"], root_page_id=payload["page_id"])
+    result = await service.run_bootstrap_async(space_key=payload["space"], root_page_id=payload["page_id"])
     return JSONResponse({"mode": result.mode, "processed_pages": result.processed_pages})
 
 
@@ -249,5 +249,5 @@ async def admin_sync(
     if x_admin_token != _settings(request).sync_admin_token:
         raise HTTPException(status_code=401, detail="Invalid admin token")
     service = SyncService(settings=_settings(request))
-    result = service.run_incremental(space_key=payload["space"])
+    result = await service.run_incremental_async(space_key=payload["space"])
     return JSONResponse({"mode": result.mode, "processed_pages": result.processed_pages})

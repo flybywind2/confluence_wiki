@@ -7,9 +7,10 @@ from app.services.sync_service import SyncService
 
 
 class FakeConfluenceClient:
-    def __init__(self, search_ids=None, include_attachment=False):
+    def __init__(self, search_ids=None, include_attachment=False, title_overrides=None):
         self.search_ids = search_ids or ["100", "200"]
         self.include_attachment = include_attachment
+        self.title_overrides = title_overrides or {}
 
     async def fetch_descendant_pages(self, root_page_id: str):
         return [{"id": root_page_id}, {"id": "200"}]
@@ -17,7 +18,7 @@ class FakeConfluenceClient:
     async def fetch_page(self, page_id: str):
         return {
             "id": page_id,
-            "title": "Root Page" if page_id == "100" else "Child Page",
+            "title": self.title_overrides.get(page_id, "Root Page" if page_id == "100" else "Child Page"),
             "space_key": "DEMO",
             "parent_id": None if page_id == "100" else "100",
             "version": 1,
@@ -111,3 +112,28 @@ def test_repeat_sync_does_not_duplicate_assets_or_versions(tmp_path, sample_sett
     assert asset_count == 1
     assert version_count == 1
     assert document_count == 1
+
+
+def test_page_slug_stays_stable_when_title_changes(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    first_service = SyncService(settings=settings, confluence_client=FakeConfluenceClient(search_ids=["100"]))
+    first_service.run_incremental(space_key="DEMO")
+
+    renamed_service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(search_ids=["100"], title_overrides={"100": "Renamed Root Page"}),
+    )
+    renamed_service.run_incremental(space_key="DEMO")
+
+    session = renamed_service.session_factory()
+    try:
+        page = session.scalar(select(Page).where(Page.confluence_page_id == "100"))
+    finally:
+        session.close()
+
+    assert page.slug == "root-page-100"
