@@ -40,6 +40,18 @@ python -m pip install -e ".[dev]"
 copy .env.example .env
 ```
 
+`.env` 에서는 최소한 아래 값을 먼저 채워야 합니다.
+
+- `CONF_MIRROR_BASE_URL`
+- `CONF_PROD_BASE_URL`
+- `CONF_USERNAME`
+- `CONF_PASSWORD`
+- `CONF_VERIFY_SSL=false`
+- `SYNC_ADMIN_TOKEN`
+- `DATABASE_URL`
+- `WIKI_ROOT`
+- `CACHE_ROOT`
+
 ## 실행
 
 웹 서버:
@@ -68,6 +80,124 @@ python -m app.demo_seed
 
 샘플 markdown 원본은 `data/demo_seed/pages/` 아래에 있고, 시드 실행 시 `WIKI_ROOT`와 DB 메타데이터가 함께 채워집니다.
 
+## 운영 순서
+
+운영에서는 아래 순서를 권장합니다.
+
+1. `.env` 를 채웁니다.
+2. Space별로 최초 1회 bootstrap 을 실행합니다.
+3. 웹 서버를 상시 실행합니다.
+4. 외부 스케줄러가 매일 `sync` 를 호출하게 붙입니다.
+
+예시:
+
+```bash
+python -m app.cli bootstrap --space DEMO --page-id 123456
+python -m app.cli bootstrap --space ARCH --page-id 456789
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+`sync` 는 내부적으로 항상 `전전일 00:00 ~ 23:59` 기준의 증분 동기화를 수행합니다.
+
+## 외부 스케줄러 연동
+
+권장 원칙:
+
+- 여러 Space를 동시에 돌리지 않습니다.
+- mirror 제한이 `10회/분` 이므로 Space 간에는 여유를 두고 순차 실행합니다.
+- 최초 bootstrap 은 수동 또는 별도 운영 작업으로 처리하고, 일일 작업은 `sync` 만 스케줄링합니다.
+
+두 가지 방식 중 하나를 쓰면 됩니다.
+
+### 1. 같은 서버에서 CLI 호출
+
+웹 서버와 같은 서버에서 스케줄러가 돈다면 이 방식이 가장 단순합니다.
+
+예제 스크립트:
+
+- [scripts/scheduler/invoke_sync_cli.ps1](D:/Python/confluence_wiki/repo_clone/.worktrees/codex-confluence-wiki/scripts/scheduler/invoke_sync_cli.ps1)
+
+사용 예시:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\scheduler\invoke_sync_cli.ps1 `
+  -Spaces "DEMO,ARCH" `
+  -PythonExe python `
+  -PauseSeconds 75
+```
+
+동작:
+
+- `DEMO` sync 실행
+- `75초` 대기
+- `ARCH` sync 실행
+
+### 2. 별도 서버에서 HTTP admin API 호출
+
+스케줄러가 다른 서버에 있거나, 중앙 배치 서버에서 호출할 때 적합합니다.
+
+예제 스크립트:
+
+- [scripts/scheduler/invoke_sync_http.ps1](D:/Python/confluence_wiki/repo_clone/.worktrees/codex-confluence-wiki/scripts/scheduler/invoke_sync_http.ps1)
+
+사용 예시:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\scheduler\invoke_sync_http.ps1 `
+  -BaseUrl http://wiki-host:8000 `
+  -AdminToken change-me `
+  -Spaces "DEMO,ARCH" `
+  -PauseSeconds 75
+```
+
+직접 호출 예시:
+
+```bash
+curl -X POST http://wiki-host:8000/admin/sync \
+  -H "X-Admin-Token: change-me" \
+  -H "Content-Type: application/json" \
+  -d "{\"space\":\"DEMO\"}"
+```
+
+## Windows 작업 스케줄러 예시
+
+Windows 작업 스케줄러에서 하루 1회 새벽 실행 예시는 아래처럼 잡으면 됩니다.
+
+권장:
+
+- `DEMO`: 매일 03:10
+- `ARCH`: 매일 03:12 또는 03:15
+
+같은 작업에 여러 space를 넣고 싶다면 CLI 스크립트를 사용하고, 한 작업에서 순차 실행되게 두는 편이 안전합니다.
+
+작업 등록 예시:
+
+```powershell
+schtasks /Create /F /SC DAILY /ST 03:10 /TN "ConfluenceWikiSync" `
+  /TR "powershell -ExecutionPolicy Bypass -File D:\Python\confluence_wiki\repo_clone\.worktrees\codex-confluence-wiki\scripts\scheduler\invoke_sync_cli.ps1 -Spaces ""DEMO,ARCH"" -PythonExe python -PauseSeconds 75"
+```
+
+이미 웹 서버가 떠 있고, 배치 서버에서 HTTP로만 쏘고 싶다면:
+
+```powershell
+schtasks /Create /F /SC DAILY /ST 03:10 /TN "ConfluenceWikiSyncHttp" `
+  /TR "powershell -ExecutionPolicy Bypass -File D:\Python\confluence_wiki\repo_clone\.worktrees\codex-confluence-wiki\scripts\scheduler\invoke_sync_http.ps1 -BaseUrl http://wiki-host:8000 -AdminToken change-me -Spaces ""DEMO,ARCH"" -PauseSeconds 75"
+```
+
+## Linux cron 예시
+
+Linux 에서 로컬 CLI 방식으로 붙일 경우:
+
+```cron
+10 3 * * * cd /opt/confluence_wiki && /usr/bin/pwsh -File ./scripts/scheduler/invoke_sync_cli.ps1 -Spaces "DEMO,ARCH" -PythonExe python3 -PauseSeconds 75 >> /var/log/confluence_wiki_sync.log 2>&1
+```
+
+HTTP 방식이라면:
+
+```cron
+10 3 * * * /usr/bin/pwsh -File /opt/confluence_wiki/scripts/scheduler/invoke_sync_http.ps1 -BaseUrl http://wiki-host:8000 -AdminToken change-me -Spaces "DEMO,ARCH" -PauseSeconds 75 >> /var/log/confluence_wiki_sync.log 2>&1
+```
+
 ## 관리자 API
 
 외부 스케줄러가 직접 호출할 경우:
@@ -79,6 +209,12 @@ python -m app.demo_seed
 
 ```text
 X-Admin-Token: <SYNC_ADMIN_TOKEN>
+```
+
+Payload 예시:
+
+```json
+{"space":"DEMO"}
 ```
 
 ## 저장 구조
