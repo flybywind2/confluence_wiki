@@ -6,7 +6,7 @@
 
 **Architecture:** The application is split into a sync pipeline and a read-focused web app. Markdown pages and assets live on disk, while SQLAlchemy-managed metadata tracks spaces, pages, sync runs, graph edges, and assets in a DB that starts on SQLite but can later move to MySQL or PostgreSQL.
 
-**Tech Stack:** Python 3.12, FastAPI, Jinja2, SQLAlchemy 2.x, Alembic, httpx, pydantic-settings, pytest, BeautifulSoup4, markdown-it-py, frontmatter, networkx or direct graph JSON generation
+**Tech Stack:** Python 3.10.11+, FastAPI, Jinja2, SQLAlchemy 2.x, Alembic, httpx, pydantic-settings, pytest, BeautifulSoup4, markdown-it-py, frontmatter, networkx or direct graph JSON generation
 
 ---
 

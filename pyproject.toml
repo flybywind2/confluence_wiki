@@ -7,7 +7,7 @@ name = "confluence-wiki"
 version = "0.1.0"
 description = "Confluence Data Center mirror based markdown wiki service"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
   "alembic>=1.16.0",
   "beautifulsoup4>=4.13.0",
@@ -22,6 +22,7 @@ dependencies = [
   "python-slugify>=8.0.0",
   "pyyaml>=6.0.0",
   "sqlalchemy>=2.0.0",
+  "tzdata>=2024.1",
   "uvicorn>=0.35.0",
 ]
 

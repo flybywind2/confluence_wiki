@@ -2,6 +2,8 @@
 
 Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Space를 markdown 파일로 동기화하고, FastAPI로 문서 화면과 graph view를 제공합니다.
 
+지원 Python 버전은 `3.10.11+` 입니다.
+
 ## 주요 기능
 
 - mirror URL 전용 읽기, prod URL 전용 원문 링크
@@ -53,6 +55,13 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 ```bash
 python -m pip install -e ".[dev]"
 copy .env.example .env
+```
+
+Windows에서 Python 3.10.11을 명시적으로 쓰려면 예를 들어 아래처럼 실행하면 됩니다.
+
+```powershell
+py -3.10 -m pip install -e ".[dev]"
+py -3.10 -m uvicorn app.main:app --reload
 ```
 
 `.env` 에서는 최소한 아래 값을 먼저 채워야 합니다.
