@@ -16,6 +16,11 @@
     <p>Confluence mirror에서 동기화한 markdown wiki를 읽기 중심 UI로 제공합니다.</p>
     {% endif %}
   </div>
+  {% if synthesis_href %}
+  <div class="hero-actions">
+    <a class="hero-link" href="{{ synthesis_href }}">Synthesis</a>
+  </div>
+  {% endif %}
 </section>
 
 <section class="list-card">

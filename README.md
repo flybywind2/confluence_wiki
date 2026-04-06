@@ -9,6 +9,9 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 - Space별 bootstrap pageId + 하위 페이지 위키 생성
 - 전전일 기준 Space 전체 증분 동기화
 - markdown 파일 저장 + SQLite 메타데이터 저장
+- 문서별 history snapshot 저장
+- append-only `log.md` 운영 로그
+- space별 `synthesis.md` 누적 요약 페이지
 - 복잡한 표는 HTML fallback
 - 이미지 로컬 저장 + VLM 기반 한국어 설명
 - Obsidian 스타일 graph view
@@ -85,13 +88,15 @@ python -m app.demo_seed
 운영에서는 아래 순서를 권장합니다.
 
 1. `.env` 를 채웁니다.
-2. Space별로 최초 1회 bootstrap 을 실행합니다.
-3. 웹 서버를 상시 실행합니다.
-4. 외부 스케줄러가 매일 `sync` 를 호출하게 붙입니다.
+2. 기존 DB를 쓰고 있다면 migration 을 먼저 실행합니다.
+3. Space별로 최초 1회 bootstrap 을 실행합니다.
+4. 웹 서버를 상시 실행합니다.
+5. 외부 스케줄러가 매일 `sync` 를 호출하게 붙입니다.
 
 예시:
 
 ```bash
+alembic upgrade head
 python -m app.cli bootstrap --space DEMO --page-id 123456
 python -m app.cli bootstrap --space ARCH --page-id 456789
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
@@ -220,9 +225,20 @@ Payload 예시:
 ## 저장 구조
 
 - 문서: `data/wiki/spaces/<SPACE_KEY>/pages/*.md`
+- 문서 이력: `data/wiki/spaces/<SPACE_KEY>/history/<slug>/v0001.md`
+- space 누적 요약: `data/wiki/spaces/<SPACE_KEY>/synthesis.md`
+- space 운영 로그: `data/wiki/spaces/<SPACE_KEY>/log.md`
 - 이미지: `data/wiki/spaces/<SPACE_KEY>/assets/*`
 - 그래프: `data/wiki/global/graph.json`
 - DB: `data/db/app.db`
+
+## 화면
+
+- `문서 홈`: Space별 최근 문서와 synthesis 링크
+- `문서 상세`: 원문 링크, 현재 버전, 최근 history 링크
+- `문서 이력`: 버전 목록과 과거 snapshot 조회
+- `Synthesis`: Space별 누적 요약 페이지
+- `Graph View`: 계층 링크 + 위키 링크 동시 시각화
 
 ## 설계 문서
 

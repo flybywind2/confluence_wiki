@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ page.title }}{% endblock %}
+{% block title %}{{ page.title }} 이력{% endblock %}
 {% block content %}
 <article class="page-card">
   <nav class="page-breadcrumbs" aria-label="breadcrumb">
@@ -7,45 +7,24 @@
     <span>/</span>
     <a href="/spaces/{{ page_space_key }}">{{ page_space_key }}</a>
     <span>/</span>
-    <span>{{ page.title }}</span>
+    <a href="/spaces/{{ page_space_key }}/pages/{{ page.slug }}">{{ page.title }}</a>
+    <span>/</span>
+    <span>문서 이력</span>
   </nav>
-  {% if history_notice %}
-  <div class="history-banner">
-    <span>{{ history_notice }}</span>
-    {% if current_page_href %}
-    <a href="{{ current_page_href }}">최신 문서 보기</a>
-    {% endif %}
-  </div>
-  {% endif %}
   <header class="page-header">
     <span class="eyebrow">{{ page_space_key }}</span>
-    <h1>{{ page.title }}</h1>
+    <h1>{{ page.title }} 문서 이력</h1>
     <div class="page-submeta">
-      {% if page.updated_at_remote %}
-      <span>마지막 동기화 원문 시각 · {{ page.updated_at_remote }}</span>
-      {% endif %}
-      {% if page.current_version and page_kind == "page" %}
       <span>현재 버전 · {{ page.current_version }}</span>
-      {% endif %}
       <div class="page-actions">
-        {% if history_href %}
-        <a class="source-link" href="{{ history_href }}">문서 이력</a>
-        {% endif %}
-        {% if page.prod_url %}
+        <a class="source-link" href="/spaces/{{ page_space_key }}/pages/{{ page.slug }}">최신 문서 보기</a>
         <a class="source-link" href="{{ page.prod_url }}" target="_blank" rel="noreferrer">원문 보기</a>
-        {% endif %}
       </div>
     </div>
   </header>
-  <section class="wiki-body">{{ body_html | safe }}</section>
-  {% if history_versions %}
   <section class="history-panel">
-    <div class="section-header">
-      <h2>문서 이력</h2>
-      <a href="{{ history_href }}">전체 보기</a>
-    </div>
     <ul class="page-list history-list">
-      {% for version in history_versions[:5] %}
+      {% for version in versions %}
       <li>
         <a href="/spaces/{{ page_space_key }}/pages/{{ page.slug }}/history/{{ version.version_number }}">버전 {{ version.version_number }}</a>
         <span class="page-meta">
@@ -56,6 +35,5 @@
       {% endfor %}
     </ul>
   </section>
-  {% endif %}
 </article>
 {% endblock %}

@@ -33,6 +33,17 @@ def test_demo_seed_populates_pages_assets_and_graph(tmp_path, sample_settings_di
     assert asset.status_code == 200
     assert b"svg" in asset.content
 
+    history_index = client.get("/spaces/DEMO/pages/demo-home-9001/history")
+    assert history_index.status_code == 200
+    assert "버전 1" in history_index.text
+
+    history_file = tmp_path / "wiki" / "spaces" / "DEMO" / "history" / "demo-home-9001" / "v0001.md"
+    assert history_file.exists()
+
+    synthesis_file = tmp_path / "wiki" / "spaces" / "DEMO" / "synthesis.md"
+    assert synthesis_file.exists()
+    assert "DEMO Synthesis" in synthesis_file.read_text(encoding="utf-8")
+
     graph = client.get("/api/graph")
     assert graph.status_code == 200
     payload = graph.json()

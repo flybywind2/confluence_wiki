@@ -58,7 +58,11 @@ class PageVersion(Base):
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     body_hash: Mapped[str] = mapped_column(String(128), nullable=False)
     source_excerpt_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    markdown_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     page: Mapped[Page] = relationship(back_populates="versions")
 

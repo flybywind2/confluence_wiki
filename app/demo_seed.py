@@ -11,9 +11,9 @@ from app.core.config import Settings, get_settings
 from app.db.models import Asset, Page, PageLink, PageVersion, WikiDocument
 from app.db.session import create_session_factory
 from app.graph.builder import build_graph_payload, write_graph_cache
-from app.services.index_builder import build_global_index, build_space_index, build_space_log
+from app.services.index_builder import append_space_log, build_global_index, build_space_index, build_space_synthesis, read_space_log_excerpt
 from app.services.space_registry import upsert_space
-from app.services.wiki_writer import write_page_markdown
+from app.services.wiki_writer import write_history_markdown, write_page_markdown
 
 DEMO_ROOT = Path(__file__).resolve().parent.parent / "data" / "demo_seed"
 PAGES_ROOT = DEMO_ROOT / "pages"
@@ -156,6 +156,14 @@ def seed_demo_content(settings: Settings | None = None) -> dict[str, int]:
                 frontmatter=frontmatter,
                 body=body,
             )
+            history_path = write_history_markdown(
+                root=settings.wiki_root,
+                space_key=page_def["space_key"],
+                slug=page_def["slug"],
+                version_number=1,
+                frontmatter={**frontmatter, "historical": True, "version_number": 1, "latest_slug": page_def["slug"]},
+                body=body,
+            )
 
             body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
             page_version = session.scalar(
@@ -168,17 +176,23 @@ def seed_demo_content(settings: Settings | None = None) -> dict[str, int]:
                         version_number=1,
                         body_hash=body_hash,
                         source_excerpt_hash=body_hash,
+                        markdown_path=history_path.relative_to(settings.wiki_root).as_posix(),
+                        summary=_summary(body),
+                        source_updated_at=updated_at,
                     )
                 )
             else:
                 page_version.body_hash = body_hash
                 page_version.source_excerpt_hash = body_hash
+                page_version.markdown_path = history_path.relative_to(settings.wiki_root).as_posix()
+                page_version.summary = _summary(body)
+                page_version.source_updated_at = updated_at
 
             wiki_document = session.scalar(select(WikiDocument).where(WikiDocument.page_id == page_record.id))
             if wiki_document is None:
                 wiki_document = WikiDocument(page_id=page_record.id)
                 session.add(wiki_document)
-            wiki_document.markdown_path = str(markdown_path.relative_to(settings.wiki_root))
+            wiki_document.markdown_path = markdown_path.relative_to(settings.wiki_root).as_posix()
             wiki_document.summary = _summary(body)
             wiki_document.index_line = f"- [[{page_def['space_key']}/{page_def['slug']}]]"
 
@@ -242,7 +256,14 @@ def seed_demo_content(settings: Settings | None = None) -> dict[str, int]:
 
         for space_key, docs in documents_by_space.items():
             build_space_index(settings.wiki_root, space_key, docs)
-            build_space_log(settings.wiki_root, space_key, docs)
+            append_space_log(settings.wiki_root, space_key, "demo-seed", datetime.now(), docs)
+            build_space_synthesis(
+                settings.wiki_root,
+                space_key,
+                docs,
+                generated_at=datetime.now(),
+                recent_log_entries=read_space_log_excerpt(settings.wiki_root, space_key),
+            )
         build_global_index(settings.wiki_root, documents_by_space)
 
         graph_nodes = [

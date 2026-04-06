@@ -22,10 +22,10 @@ from app.llm.vision_client import VisionClient
 from app.parser.storage import storage_to_markdown
 from app.services.assets import BODY_IMAGE_PLACEHOLDER_RE, build_image_markdown, build_wiki_asset_url, is_image_filename, save_asset
 from app.services.cql import build_incremental_cql
-from app.services.index_builder import build_global_index, build_space_index, build_space_log
+from app.services.index_builder import append_space_log, build_global_index, build_space_index, build_space_synthesis, read_space_log_excerpt
 from app.services.space_registry import upsert_space
 from app.services.sync_window import build_day_before_yesterday_window
-from app.services.wiki_writer import write_page_markdown
+from app.services.wiki_writer import write_history_markdown, write_page_markdown
 
 
 @dataclass
@@ -91,7 +91,13 @@ class SyncService:
         cql = build_incremental_cql(space_key, start, end)
         search_results = await self.confluence_client.search_cql(space_key, cql)
         page_ids = [item["id"] for item in search_results]
-        return await self._sync_pages(space_key=space_key, page_ids=page_ids, mode="incremental", root_page_id=None)
+        return await self._sync_pages(
+            space_key=space_key,
+            page_ids=page_ids,
+            mode="incremental",
+            root_page_id=None,
+            window_label=f"{start.isoformat()} ~ {end.isoformat()}",
+        )
 
     async def _sync_pages(
         self,
@@ -99,6 +105,7 @@ class SyncService:
         page_ids: list[str],
         mode: str,
         root_page_id: str | None,
+        window_label: str | None = None,
     ) -> SyncResult:
         session = self.session_factory()
         processed_assets = 0
@@ -217,6 +224,20 @@ class SyncService:
                     frontmatter=frontmatter,
                     body=markdown_body,
                 )
+                history_frontmatter = {
+                    **frontmatter,
+                    "historical": True,
+                    "version_number": raw_page.get("version", 1),
+                    "latest_slug": raw_page["slug"],
+                }
+                history_path = write_history_markdown(
+                    root=self.settings.wiki_root,
+                    space_key=space_key,
+                    slug=raw_page["slug"],
+                    version_number=raw_page.get("version", 1),
+                    frontmatter=history_frontmatter,
+                    body=markdown_body,
+                )
 
                 body_hash = hashlib.sha256(markdown_body.encode("utf-8")).hexdigest()
                 page_version = session.scalar(
@@ -232,24 +253,30 @@ class SyncService:
                             version_number=raw_page.get("version", 1),
                             body_hash=body_hash,
                             source_excerpt_hash=body_hash,
+                            markdown_path=history_path.relative_to(self.settings.wiki_root).as_posix(),
+                            summary=summary,
+                            source_updated_at=page_record.updated_at_remote,
                         )
                     )
                 else:
                     page_version.body_hash = body_hash
                     page_version.source_excerpt_hash = body_hash
+                    page_version.markdown_path = history_path.relative_to(self.settings.wiki_root).as_posix()
+                    page_version.summary = summary
+                    page_version.source_updated_at = page_record.updated_at_remote
                     page_version.synced_at = self._utcnow()
 
                 wiki_document = session.scalar(select(WikiDocument).where(WikiDocument.page_id == page_record.id))
                 if wiki_document is None:
                     wiki_document = WikiDocument(
                         page_id=page_record.id,
-                        markdown_path=str(markdown_path.relative_to(self.settings.wiki_root)),
+                        markdown_path=markdown_path.relative_to(self.settings.wiki_root).as_posix(),
                         summary=summary,
                         index_line=f"- [[{space_key}/{raw_page['slug']}]]",
                     )
                     session.add(wiki_document)
                 else:
-                    wiki_document.markdown_path = str(markdown_path.relative_to(self.settings.wiki_root))
+                    wiki_document.markdown_path = markdown_path.relative_to(self.settings.wiki_root).as_posix()
                     wiki_document.summary = summary
                     wiki_document.index_line = f"- [[{space_key}/{raw_page['slug']}]]"
 
@@ -261,6 +288,14 @@ class SyncService:
                     }
                 )
 
+            append_space_log(
+                self.settings.wiki_root,
+                space_key=space_key,
+                mode=mode,
+                timestamp=datetime.now(ZoneInfo(self.settings.app_timezone)),
+                documents=documents_for_index,
+                window_label=window_label,
+            )
             session.execute(delete(PageLink).where(PageLink.source_page_id.in_([page.id for page in page_records.values()])))
             session.flush()
 
@@ -468,12 +503,19 @@ class SyncService:
                     "title": page.title,
                     "slug": page.slug,
                     "updated_at": page.updated_at_remote.isoformat() if page.updated_at_remote else "",
+                    "summary": _wiki_document.summary or "",
                 }
                 for page, _wiki_document in rows
             ]
             grouped_documents[space_key] = documents
             build_space_index(self.settings.wiki_root, space_key, documents)
-            build_space_log(self.settings.wiki_root, space_key, documents)
+            build_space_synthesis(
+                self.settings.wiki_root,
+                space_key,
+                documents,
+                generated_at=datetime.now(ZoneInfo(self.settings.app_timezone)),
+                recent_log_entries=read_space_log_excerpt(self.settings.wiki_root, space_key),
+            )
 
         build_global_index(self.settings.wiki_root, grouped_documents)
 
