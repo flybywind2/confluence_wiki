@@ -60,6 +60,32 @@ async def test_search_cql_follows_pagination(sample_settings_dict, monkeypatch):
     assert [item["id"] for item in results] == ["1", "2"]
 
 
+@pytest.mark.asyncio
+async def test_fetch_page_tree_walks_children_recursively(sample_settings_dict, monkeypatch):
+    settings = Settings.model_validate(sample_settings_dict)
+    client = ConfluenceClient(settings)
+    calls = []
+
+    async def fake_collect(path, params=None):
+        calls.append(path)
+        mapping = {
+            "/content/100/child/page": [{"id": "200"}, {"id": "300"}],
+            "/content/200/child/page": [{"id": "400"}],
+            "/content/300/child/page": [],
+            "/content/400/child/page": [],
+        }
+        return mapping[path]
+
+    monkeypatch.setattr(client, "_collect_paginated_results", fake_collect)
+
+    results = await client.fetch_page_tree("100")
+
+    assert [item["id"] for item in results] == ["200", "300", "400"]
+    assert "/content/100/child/page" in calls
+    assert "/content/200/child/page" in calls
+    assert "/content/300/child/page" in calls
+
+
 def test_download_target_rewrites_prod_absolute_url_to_mirror(sample_settings_dict):
     settings = Settings.model_validate(sample_settings_dict)
     client = ConfluenceClient(settings)

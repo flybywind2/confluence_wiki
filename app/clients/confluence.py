@@ -85,6 +85,27 @@ class ConfluenceClient:
         results = await self._collect_paginated_results(f"/content/{root_page_id}/descendant/page", params={"limit": 1000})
         return [{"id": str(item["id"])} for item in results]
 
+    async def fetch_child_pages(self, root_page_id: str) -> list[dict[str, Any]]:
+        results = await self._collect_paginated_results(f"/content/{root_page_id}/child/page", params={"limit": 1000})
+        return [{"id": str(item["id"])} for item in results]
+
+    async def fetch_page_tree(self, root_page_id: str) -> list[dict[str, Any]]:
+        pending = [str(root_page_id)]
+        seen = {str(root_page_id)}
+        collected: list[dict[str, Any]] = []
+
+        while pending:
+            current_page_id = pending.pop(0)
+            for item in await self.fetch_child_pages(current_page_id):
+                page_id = str(item["id"])
+                if page_id in seen:
+                    continue
+                seen.add(page_id)
+                collected.append({"id": page_id})
+                pending.append(page_id)
+
+        return collected
+
     async def search_cql(self, space_key: str, cql: str) -> list[dict[str, Any]]:
         results = await self._collect_paginated_results("/content/search", params={"cql": cql, "limit": 1000})
         return [{"id": str(item["id"])} for item in results]

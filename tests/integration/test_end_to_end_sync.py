@@ -26,7 +26,7 @@ class FakeConfluenceClient:
         self.version_overrides = version_overrides or {}
         self.updated_at_overrides = updated_at_overrides or {}
 
-    async def fetch_descendant_pages(self, root_page_id: str):
+    async def fetch_page_tree(self, root_page_id: str):
         return [{"id": root_page_id}, {"id": "200"}]
 
     async def fetch_page(self, page_id: str):

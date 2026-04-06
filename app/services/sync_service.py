@@ -83,7 +83,10 @@ class SyncService:
         return await self._run_incremental(space_key, now)
 
     async def _run_bootstrap(self, space_key: str, root_page_id: str) -> SyncResult:
-        descendants = await self.confluence_client.fetch_descendant_pages(root_page_id)
+        if hasattr(self.confluence_client, "fetch_page_tree"):
+            descendants = await self.confluence_client.fetch_page_tree(root_page_id)
+        else:
+            descendants = await self.confluence_client.fetch_descendant_pages(root_page_id)
         page_ids = [root_page_id, *[item["id"] for item in descendants if item["id"] != root_page_id]]
         return await self._sync_pages(space_key=space_key, page_ids=page_ids, mode="bootstrap", root_page_id=root_page_id)
 
