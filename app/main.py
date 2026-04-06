@@ -58,6 +58,7 @@ def create_app(settings: Settings | None = None, allow_test_fallback: bool | Non
     app.state.templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
+    app.mount("/wiki-static", StaticFiles(directory=str(settings.wiki_root)), name="wiki-static")
     app.include_router(router)
     return app
 

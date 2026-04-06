@@ -5,6 +5,7 @@ import re
 from bs4 import BeautifulSoup, NavigableString, Tag
 
 from app.parser.tables import render_table_block
+from app.services.assets import make_attachment_image_placeholder, make_source_image_placeholder
 
 _PAGE_ID_RE = re.compile(r"pageId=(\d+)")
 
@@ -30,6 +31,22 @@ def _render_inline(node: Tag | NavigableString) -> str:
             return f"[[pageid:{target_id}|{text}]]"
         href = node.get("href") or "#"
         return f"[{text}]({href})"
+    if name == "img":
+        src = (node.get("src") or "").strip()
+        alt = (node.get("alt") or "").strip() or "image"
+        if src:
+            return make_source_image_placeholder(src, alt)
+        return ""
+    if name == "ac:image":
+        attachment = node.find("ri:attachment")
+        if attachment and attachment.get("ri:filename"):
+            filename = attachment.get("ri:filename")
+            return make_attachment_image_placeholder(filename, filename)
+        url_node = node.find("ri:url")
+        if url_node and url_node.get("ri:value"):
+            src = url_node.get("ri:value")
+            return make_source_image_placeholder(src, "image")
+        return ""
     if name in {"strong", "b"}:
         return f"**{''.join(_render_inline(child) for child in node.children).strip()}**"
     if name in {"em", "i"}:
@@ -66,6 +83,14 @@ def storage_to_markdown(storage_html: str) -> str:
             blocks.append(f"{'#' * int(name[1])} {child.get_text(' ', strip=True)}")
         elif name == "p":
             text = "".join(_render_inline(grandchild) for grandchild in child.children).strip()
+            if text:
+                blocks.append(text)
+        elif name == "img":
+            text = _render_inline(child).strip()
+            if text:
+                blocks.append(text)
+        elif name == "ac:image":
+            text = _render_inline(child).strip()
             if text:
                 blocks.append(text)
         elif name == "ul":

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from functools import lru_cache
 
 
 class MinuteRateLimiter:
@@ -23,3 +24,8 @@ class MinuteRateLimiter:
                     return
                 wait_time = self.period_seconds - (now - self._timestamps[0])
             await asyncio.sleep(max(wait_time, 0.01))
+
+
+@lru_cache(maxsize=16)
+def get_shared_rate_limiter(limit: int, period_seconds: int = 60) -> MinuteRateLimiter:
+    return MinuteRateLimiter(limit=limit, period_seconds=period_seconds)

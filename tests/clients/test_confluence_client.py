@@ -58,3 +58,45 @@ async def test_search_cql_follows_pagination(sample_settings_dict, monkeypatch):
     results = await client.search_cql("DEMO", 'space="DEMO"')
 
     assert [item["id"] for item in results] == ["1", "2"]
+
+
+def test_download_target_rewrites_prod_absolute_url_to_mirror(sample_settings_dict):
+    settings = Settings.model_validate(sample_settings_dict)
+    client = ConfluenceClient(settings)
+
+    resolved = client._resolve_download_url("https://prod.example.com/confluence/download/attachments/100/diagram.png")
+
+    assert resolved == "https://mirror.example.com/confluence/download/attachments/100/diagram.png"
+
+
+def test_download_target_rewrites_root_relative_path_under_confluence_base(sample_settings_dict):
+    settings = Settings.model_validate(sample_settings_dict)
+    client = ConfluenceClient(settings)
+
+    resolved = client._resolve_download_url("/download/attachments/100/diagram.png")
+
+    assert resolved == "https://mirror.example.com/confluence/download/attachments/100/diagram.png"
+
+
+def test_download_target_rejects_non_confluence_absolute_url(sample_settings_dict):
+    settings = Settings.model_validate(sample_settings_dict)
+    client = ConfluenceClient(settings)
+
+    with pytest.raises(ValueError):
+        client._resolve_download_url("https://evil.example.com/malware.png")
+
+
+def test_download_target_rejects_allowed_host_outside_confluence_base(sample_settings_dict):
+    settings = Settings.model_validate(sample_settings_dict)
+    client = ConfluenceClient(settings)
+
+    with pytest.raises(ValueError):
+        client._resolve_download_url("https://prod.example.com/evil.png")
+
+
+def test_download_target_rejects_relative_path_escape(sample_settings_dict):
+    settings = Settings.model_validate(sample_settings_dict)
+    client = ConfluenceClient(settings)
+
+    with pytest.raises(ValueError):
+        client._resolve_download_url("../../evil.png")

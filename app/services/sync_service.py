@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, select
@@ -18,7 +20,7 @@ from app.graph.builder import build_graph_payload, write_graph_cache
 from app.llm.text_client import TextLLMClient
 from app.llm.vision_client import VisionClient
 from app.parser.storage import storage_to_markdown
-from app.services.assets import build_image_markdown, is_image_filename, save_asset
+from app.services.assets import BODY_IMAGE_PLACEHOLDER_RE, build_image_markdown, build_wiki_asset_url, is_image_filename, save_asset
 from app.services.cql import build_incremental_cql
 from app.services.index_builder import build_global_index, build_space_index, build_space_log
 from app.services.space_registry import upsert_space
@@ -157,36 +159,47 @@ class SyncService:
 
                 session.execute(delete(Asset).where(Asset.page_id == page_record.id))
 
-                image_blocks: list[str] = []
+                downloaded_assets: dict[str, dict[str, str | None]] = {}
                 for attachment in await self.confluence_client.list_attachments(raw_page["id"]):
                     if not attachment.get("download"):
                         continue
-                    is_image = is_image_filename(attachment["filename"])
-                    content = await self.confluence_client.download_bytes(attachment["download"])
-                    asset_root = self.settings.wiki_root / "spaces" / space_key / "assets"
-                    local_path = save_asset(asset_root, attachment["filename"], content)
-                    caption = self.vision_client.describe_image(local_path) if is_image and self.vision_client else None
-                    if is_image:
-                        relative_path = local_path.relative_to(self.settings.wiki_root / "spaces" / space_key).as_posix()
-                        image_blocks.append(build_image_markdown(relative_path, attachment["filename"], caption))
-                    processed_assets += 1
-                    session.add(
-                        Asset(
-                            page_id=page_record.id,
-                            confluence_attachment_id=attachment.get("id"),
-                            filename=attachment["filename"],
-                            mime_type=attachment.get("mime_type"),
-                            local_path=str(local_path.relative_to(self.settings.wiki_root)),
-                            body_path=attachment.get("download"),
-                            is_image=is_image,
-                            vlm_status="done" if caption else "skipped",
-                            vlm_summary=caption,
-                            downloaded_at=self._utcnow(),
+                    asset_info = await self._materialize_asset(
+                        session=session,
+                        page_record=page_record,
+                        space_key=space_key,
+                        filename=attachment["filename"],
+                        download_path=attachment["download"],
+                        confluence_attachment_id=attachment.get("id"),
+                        mime_type=attachment.get("mime_type"),
+                    )
+                    if asset_info is not None:
+                        downloaded_assets[attachment["filename"]] = asset_info
+                        processed_assets += 1
+
+                markdown_body, inline_image_keys, new_body_assets = await self._replace_body_image_placeholders(
+                    session=session,
+                    page_record=page_record,
+                    space_key=space_key,
+                    markdown_body=markdown_body,
+                    downloaded_assets=downloaded_assets,
+                )
+                downloaded_assets.update(new_body_assets)
+                processed_assets += len(new_body_assets)
+
+                trailing_images = []
+                for filename, asset_info in downloaded_assets.items():
+                    if filename in inline_image_keys or asset_info.get("is_image") is not True:
+                        continue
+                    trailing_images.append(
+                        build_image_markdown(
+                            str(asset_info["public_url"]),
+                            str(asset_info.get("alt_text") or filename),
+                            str(asset_info.get("caption") or "") or None,
                         )
                     )
 
-                if image_blocks:
-                    markdown_body = markdown_body + "\n\n## 이미지\n\n" + "\n\n".join(image_blocks)
+                if trailing_images:
+                    markdown_body = markdown_body + "\n\n## 이미지\n\n" + "\n\n".join(trailing_images)
 
                 frontmatter = {
                     "space_key": space_key,
@@ -316,6 +329,129 @@ class SyncService:
             return self.confluence_client.build_page_url(raw_page["id"])
         webui = raw_page.get("webui") or f"/pages/viewpage.action?pageId={raw_page['id']}"
         return f"{self.settings.conf_prod_base_url.rstrip('/')}/{webui.lstrip('/')}"
+
+    @staticmethod
+    def _image_reference_name(value: str) -> str:
+        return Path(unquote(urlparse(value).path)).name
+
+    async def _materialize_asset(
+        self,
+        session,
+        page_record: Page,
+        space_key: str,
+        filename: str,
+        download_path: str,
+        confluence_attachment_id: str | None,
+        mime_type: str | None,
+        force_image: bool = False,
+    ) -> dict[str, str | bool | None]:
+        safe_filename = Path(filename).name or "asset"
+        content = await self.confluence_client.download_bytes(download_path)
+        asset_root = self.settings.wiki_root / "spaces" / space_key / "assets"
+        local_path = save_asset(asset_root, safe_filename, content)
+        is_image = force_image or is_image_filename(safe_filename) or bool((mime_type or "").startswith("image/"))
+        caption = self.vision_client.describe_image(local_path) if is_image and self.vision_client else None
+        public_url = build_wiki_asset_url(space_key, safe_filename)
+
+        session.add(
+            Asset(
+                page_id=page_record.id,
+                confluence_attachment_id=confluence_attachment_id,
+                filename=safe_filename,
+                mime_type=mime_type,
+                local_path=str(local_path.relative_to(self.settings.wiki_root)),
+                body_path=download_path,
+                is_image=is_image,
+                vlm_status="done" if caption else "skipped",
+                vlm_summary=caption,
+                downloaded_at=self._utcnow(),
+            )
+        )
+        return {
+            "filename": safe_filename,
+            "public_url": public_url,
+            "local_path": str(local_path.relative_to(self.settings.wiki_root)),
+            "body_path": download_path,
+            "is_image": is_image,
+            "caption": caption,
+            "alt_text": safe_filename,
+        }
+
+    async def _replace_body_image_placeholders(
+        self,
+        session,
+        page_record: Page,
+        space_key: str,
+        markdown_body: str,
+        downloaded_assets: dict[str, dict[str, str | bool | None]],
+    ) -> tuple[str, set[str], dict[str, dict[str, str | bool | None]]]:
+        if not BODY_IMAGE_PLACEHOLDER_RE.search(markdown_body):
+            return markdown_body, set(), {}
+
+        available_assets = dict(downloaded_assets)
+        new_body_assets: dict[str, dict[str, str | bool | None]] = {}
+        inline_image_keys: set[str] = set()
+        rendered_parts: list[str] = []
+        cursor = 0
+
+        for match in BODY_IMAGE_PLACEHOLDER_RE.finditer(markdown_body):
+            rendered_parts.append(markdown_body[cursor : match.start()])
+            kind = match.group("kind")
+            value = match.group("value").strip()
+            alt_text = match.group("alt").strip() or "image"
+
+            asset_key: str | None = None
+            asset_info: dict[str, str | bool | None] | None = None
+
+            if kind == "attachment":
+                asset_key = Path(value).name
+                asset_info = available_assets.get(asset_key)
+            else:
+                candidate_name = self._image_reference_name(value)
+                if candidate_name:
+                    asset_key = candidate_name
+                    asset_info = available_assets.get(asset_key)
+
+                if asset_info is None:
+                    generated_name = candidate_name or f"image-{page_record.confluence_page_id}"
+                    try:
+                        asset_info = await self._materialize_asset(
+                            session=session,
+                            page_record=page_record,
+                            space_key=space_key,
+                            filename=generated_name,
+                            download_path=value,
+                            confluence_attachment_id=None,
+                            mime_type=None,
+                            force_image=True,
+                        )
+                    except ValueError:
+                        asset_info = None
+                        rendered_parts.append(f"![{alt_text}]({value})")
+                        cursor = match.end()
+                        continue
+                    else:
+                        asset_key = str(asset_info["filename"])
+                        new_body_assets[asset_key] = asset_info
+                        available_assets[asset_key] = asset_info
+
+            if asset_info is not None and asset_info.get("is_image") is True and asset_key:
+                asset_info["alt_text"] = alt_text
+                inline_image_keys.add(asset_key)
+                rendered_parts.append(
+                    build_image_markdown(
+                        str(asset_info["public_url"]),
+                        alt_text,
+                        str(asset_info.get("caption") or "") or None,
+                    )
+                )
+            else:
+                rendered_parts.append(alt_text)
+
+            cursor = match.end()
+
+        rendered_parts.append(markdown_body[cursor:])
+        return "".join(rendered_parts), inline_image_keys, new_body_assets
 
     def _rebuild_materialized_views(self, session) -> None:
         grouped_documents: dict[str, list[dict[str, str]]] = {}

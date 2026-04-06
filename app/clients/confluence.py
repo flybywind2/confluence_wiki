@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 
-from app.clients.rate_limit import MinuteRateLimiter
+from app.clients.rate_limit import MinuteRateLimiter, get_shared_rate_limiter
 from app.core.config import Settings, get_settings
 
 
@@ -17,7 +17,7 @@ class ConfluenceClient:
         self.prod_base_url = self.settings.conf_prod_base_url.rstrip("/")
         self.verify_ssl = self.settings.conf_verify_ssl
         self.timeout = self.settings.sync_request_timeout_seconds
-        self.limiter = limiter or MinuteRateLimiter(limit=self.settings.sync_rate_limit_per_minute)
+        self.limiter = limiter or get_shared_rate_limiter(limit=self.settings.sync_rate_limit_per_minute)
 
     def build_page_url(self, page_id: str) -> str:
         return f"{self.prod_base_url}/pages/viewpage.action?pageId={page_id}"
@@ -57,7 +57,6 @@ class ConfluenceClient:
             for key, value in (params or {}).items():
                 current_params.setdefault(key, value)
 
-        return results
         return results
 
     async def fetch_page(self, page_id: str) -> dict[str, Any]:
@@ -106,7 +105,7 @@ class ConfluenceClient:
 
     async def download_bytes(self, download_path: str) -> bytes:
         await self.limiter.acquire()
-        target_url = urljoin(self.base_url + "/", download_path.lstrip("/"))
+        target_url = self._resolve_download_url(download_path)
         async with httpx.AsyncClient(
             auth=(self.settings.conf_username, self.settings.conf_password),
             timeout=self.timeout,
@@ -115,6 +114,35 @@ class ConfluenceClient:
             response = await client.get(target_url)
             response.raise_for_status()
             return response.content
+
+    def _resolve_download_url(self, download_path: str) -> str:
+        parsed = urlparse(download_path)
+        if not parsed.scheme and not parsed.netloc:
+            if download_path.startswith("/"):
+                resolved = urlparse(f"{self.base_url.rstrip('/')}/{download_path.lstrip('/')}")
+            else:
+                resolved = urlparse(urljoin(self.base_url.rstrip("/") + "/", download_path))
+            base_path = urlparse(self.base_url).path.rstrip("/")
+            if not (resolved.path == base_path or resolved.path.startswith(f"{base_path}/")):
+                raise ValueError(f"download path is outside configured confluence base: {resolved.path}")
+            return resolved.geturl()
+
+        mirror = urlparse(self.base_url)
+        prod = urlparse(self.prod_base_url)
+        allowed_hosts = {mirror.netloc, prod.netloc}
+        if parsed.netloc not in allowed_hosts:
+            raise ValueError(f"download host is not allowed: {parsed.netloc}")
+
+        base_path = None
+        for candidate in (prod.path.rstrip("/"), mirror.path.rstrip("/")):
+            if candidate and (parsed.path == candidate or parsed.path.startswith(f"{candidate}/")):
+                base_path = parsed.path[len(candidate) :]
+                break
+        if base_path is None:
+            raise ValueError(f"download path is outside configured confluence base: {parsed.path}")
+
+        query = f"?{parsed.query}" if parsed.query else ""
+        return f"{self.base_url.rstrip('/')}/{base_path.lstrip('/')}{query}"
 
     def fetch_page_sync(self, page_id: str) -> dict[str, Any]:
         return asyncio.run(self.fetch_page(page_id))
