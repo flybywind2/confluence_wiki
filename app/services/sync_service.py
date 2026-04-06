@@ -12,7 +12,7 @@ from app.clients.confluence import ConfluenceClient
 from app.core.config import Settings, get_settings
 from app.core.markdown import extract_wiki_links, resolve_page_placeholders
 from app.core.slugs import page_slug
-from app.db.models import Asset, Page, PageLink, PageVersion, SyncRun, WikiDocument
+from app.db.models import Asset, Page, PageLink, PageVersion, Space, SyncRun, WikiDocument
 from app.db.session import create_session_factory
 from app.graph.builder import build_graph_payload, write_graph_cache
 from app.llm.text_client import TextLLMClient
@@ -101,8 +101,12 @@ class SyncService:
             session.add(sync_run)
             session.flush()
 
+            existing_pages = session.scalars(select(Page).where(Page.space_id == space.id)).all()
+            slug_lookup: dict[str, tuple[str, str]] = {
+                page.confluence_page_id: (space_key, page.slug) for page in existing_pages
+            }
+
             raw_pages: list[dict] = []
-            slug_lookup: dict[str, tuple[str, str]] = {}
             for page_id in unique_page_ids:
                 raw_page = await self.confluence_client.fetch_page(page_id)
                 raw_page["space_key"] = raw_page.get("space_key") or space_key
@@ -142,6 +146,8 @@ class SyncService:
                 page_record.updated_at_remote = self._parse_datetime(raw_page.get("updated_at"))
                 page_record.last_synced_at = self._utcnow()
                 page_records[raw_page["id"]] = page_record
+
+                session.execute(delete(Asset).where(Asset.page_id == page_record.id))
 
                 image_blocks: list[str] = []
                 for attachment in await self.confluence_client.list_attachments(raw_page["id"]):
@@ -192,14 +198,25 @@ class SyncService:
                 )
 
                 body_hash = hashlib.sha256(markdown_body.encode("utf-8")).hexdigest()
-                session.add(
-                    PageVersion(
-                        page_id=page_record.id,
-                        version_number=raw_page.get("version", 1),
-                        body_hash=body_hash,
-                        source_excerpt_hash=body_hash,
+                page_version = session.scalar(
+                    select(PageVersion).where(
+                        PageVersion.page_id == page_record.id,
+                        PageVersion.version_number == raw_page.get("version", 1),
                     )
                 )
+                if page_version is None:
+                    session.add(
+                        PageVersion(
+                            page_id=page_record.id,
+                            version_number=raw_page.get("version", 1),
+                            body_hash=body_hash,
+                            source_excerpt_hash=body_hash,
+                        )
+                    )
+                else:
+                    page_version.body_hash = body_hash
+                    page_version.source_excerpt_hash = body_hash
+                    page_version.synced_at = self._utcnow()
 
                 wiki_document = session.scalar(select(WikiDocument).where(WikiDocument.page_id == page_record.id))
                 if wiki_document is None:
@@ -227,19 +244,24 @@ class SyncService:
             session.flush()
 
             edges: list[dict] = []
+            known_pages_by_confluence_id = {
+                page.confluence_page_id: page for page in session.scalars(select(Page).where(Page.space_id == space.id)).all()
+            }
+            known_pages_by_slug = {page.slug: page for page in known_pages_by_confluence_id.values()}
             for raw_page in raw_pages:
                 source_page = page_records[raw_page["id"]]
                 parent_id = raw_page.get("parent_id")
-                if parent_id and parent_id in page_records:
+                parent_page = known_pages_by_confluence_id.get(parent_id) if parent_id else None
+                if parent_page is not None:
                     session.add(
                         PageLink(
                             source_page_id=source_page.id,
-                            target_page_id=page_records[parent_id].id,
-                            target_title=page_records[parent_id].title,
+                            target_page_id=parent_page.id,
+                            target_title=parent_page.title,
                             link_type="hierarchy",
                         )
                     )
-                    edges.append({"source": source_page.id, "target": page_records[parent_id].id, "link_type": "hierarchy"})
+                    edges.append({"source": source_page.id, "target": parent_page.id, "link_type": "hierarchy"})
 
                 markdown_path = self.settings.wiki_root / "spaces" / space_key / "pages" / f"{raw_page['slug']}.md"
                 markdown_text = markdown_path.read_text(encoding="utf-8")
@@ -247,7 +269,7 @@ class SyncService:
                     target_space, _, target_slug = wiki_link.partition("/")
                     if target_space != space_key or not target_slug:
                         continue
-                    target_page = next((page for page in page_records.values() if page.slug == target_slug), None)
+                    target_page = known_pages_by_slug.get(target_slug)
                     if target_page is None:
                         continue
                     session.add(
@@ -260,12 +282,7 @@ class SyncService:
                     )
                     edges.append({"source": source_page.id, "target": target_page.id, "link_type": "wiki"})
 
-            build_space_index(self.settings.wiki_root, space_key, documents_for_index)
-            build_space_log(self.settings.wiki_root, space_key, documents_for_index)
-            build_global_index(self.settings.wiki_root, {space_key: documents_for_index})
-
-            nodes = [{"id": page.id, "title": page.title, "space_key": space_key, "slug": page.slug} for page in page_records.values()]
-            write_graph_cache(self.settings.wiki_root, build_graph_payload(nodes=nodes, edges=edges))
+            self._rebuild_materialized_views(session)
 
             sync_run.status = "success"
             sync_run.processed_pages = len(raw_pages)
@@ -291,6 +308,48 @@ class SyncService:
             return self.confluence_client.build_page_url(raw_page["id"])
         webui = raw_page.get("webui") or f"/pages/viewpage.action?pageId={raw_page['id']}"
         return f"{self.settings.conf_prod_base_url.rstrip('/')}/{webui.lstrip('/')}"
+
+    def _rebuild_materialized_views(self, session) -> None:
+        grouped_documents: dict[str, list[dict[str, str]]] = {}
+        all_pages = session.scalars(select(Page)).all()
+        space_lookup = {space.id: space.space_key for space in session.scalars(select(Space)).all()}
+        for space_id, space_key in sorted(space_lookup.items(), key=lambda item: item[1]):
+            rows = session.execute(
+                select(Page, WikiDocument)
+                .join(WikiDocument, WikiDocument.page_id == Page.id)
+                .where(Page.space_id == space_id)
+            ).all()
+            documents = [
+                {
+                    "title": page.title,
+                    "slug": page.slug,
+                    "updated_at": page.updated_at_remote.isoformat() if page.updated_at_remote else "",
+                }
+                for page, _wiki_document in rows
+            ]
+            grouped_documents[space_key] = documents
+            build_space_index(self.settings.wiki_root, space_key, documents)
+            build_space_log(self.settings.wiki_root, space_key, documents)
+
+        build_global_index(self.settings.wiki_root, grouped_documents)
+
+        page_id_lookup = {page.id: page for page in all_pages}
+        nodes = [
+            {
+                "id": page.id,
+                "title": page.title,
+                "space_key": space_lookup.get(page.space_id, ""),
+                "slug": page.slug,
+            }
+            for page in all_pages
+        ]
+        page_links = session.scalars(select(PageLink)).all()
+        edges = [
+            {"source": link.source_page_id, "target": link.target_page_id, "link_type": link.link_type}
+            for link in page_links
+            if link.target_page_id in page_id_lookup and link.source_page_id in page_id_lookup
+        ]
+        write_graph_cache(self.settings.wiki_root, build_graph_payload(nodes=nodes, edges=edges))
 
     @staticmethod
     def _parse_datetime(value: str | None) -> datetime | None:

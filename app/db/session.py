@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from functools import lru_cache
+from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -13,6 +14,9 @@ from app.db.base import Base
 
 @lru_cache(maxsize=8)
 def create_engine_for_url(database_url: str) -> Engine:
+    if database_url.startswith("sqlite:///") and not database_url.endswith(":memory:"):
+        database_path = Path(database_url.removeprefix("sqlite:///"))
+        database_path.parent.mkdir(parents=True, exist_ok=True)
     connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
     engine = create_engine(database_url, future=True, pool_pre_ping=True, connect_args=connect_args)
     Base.metadata.create_all(engine)

@@ -41,18 +41,22 @@ class ConfluenceClient:
         response = await self._request(
             "GET",
             f"/content/{page_id}",
-            params={"expand": "body.storage,version,space,history"},
+            params={"expand": "body.storage,version,space,history,ancestors"},
         )
-        data = response.json()
+        return self._normalize_page_payload(response.json())
+
+    def _normalize_page_payload(self, data: dict[str, Any]) -> dict[str, Any]:
+        ancestors = data.get("ancestors") or []
+        parent_id = str(ancestors[-1]["id"]) if ancestors else None
         return {
             "id": str(data["id"]),
             "title": data["title"],
             "space_key": data.get("space", {}).get("key", ""),
-            "parent_id": None,
+            "parent_id": parent_id,
             "version": data.get("version", {}).get("number", 1),
             "updated_at": data.get("version", {}).get("when"),
             "body": data.get("body", {}).get("storage", {}).get("value", ""),
-            "webui": data.get("_links", {}).get("webui", f"/pages/viewpage.action?pageId={page_id}"),
+            "webui": data.get("_links", {}).get("webui", f"/pages/viewpage.action?pageId={data['id']}"),
         }
 
     async def fetch_descendant_pages(self, root_page_id: str) -> list[dict[str, Any]]:

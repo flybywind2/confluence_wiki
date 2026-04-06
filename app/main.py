@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -37,11 +38,15 @@ def _fallback_settings() -> Settings:
     )
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, allow_test_fallback: bool | None = None) -> FastAPI:
+    if allow_test_fallback is None:
+        allow_test_fallback = "pytest" in sys.modules
     if settings is None:
         try:
             settings = get_settings()
         except ValidationError:
+            if not allow_test_fallback:
+                raise
             settings = _fallback_settings()
 
     settings.wiki_root.mkdir(parents=True, exist_ok=True)
