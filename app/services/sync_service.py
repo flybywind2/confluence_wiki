@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,8 @@ from app.services.lint_service import LintService
 from app.services.space_registry import upsert_space
 from app.services.sync_window import build_day_before_yesterday_window
 from app.services.wiki_writer import write_history_markdown, write_page_markdown
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -88,6 +91,7 @@ class SyncService:
         else:
             descendants = await self.confluence_client.fetch_descendant_pages(root_page_id)
         page_ids = [root_page_id, *[item["id"] for item in descendants if item["id"] != root_page_id]]
+        logger.info("bootstrap start space=%s root_page_id=%s pages=%s", space_key, root_page_id, len(page_ids))
         return await self._sync_pages(space_key=space_key, page_ids=page_ids, mode="bootstrap", root_page_id=root_page_id)
 
     async def _run_incremental(self, space_key: str, now: datetime | None) -> SyncResult:
@@ -97,6 +101,13 @@ class SyncService:
         cql = build_incremental_cql(space_key, start, end)
         search_results = await self.confluence_client.search_cql(space_key, cql)
         page_ids = [item["id"] for item in search_results]
+        logger.info(
+            "incremental start space=%s window=%s ~ %s pages=%s",
+            space_key,
+            start.isoformat(),
+            end.isoformat(),
+            len(page_ids),
+        )
         return await self._sync_pages(
             space_key=space_key,
             page_ids=page_ids,
@@ -117,6 +128,7 @@ class SyncService:
         processed_assets = 0
         try:
             unique_page_ids = list(dict.fromkeys(page_ids))
+            logger.info("sync start mode=%s space=%s pages=%s", mode, space_key, len(unique_page_ids))
             space = upsert_space(session, space_key=space_key, root_page_id=root_page_id)
             sync_run = SyncRun(mode=mode, space_id=space.id, status="running")
             session.add(sync_run)
@@ -139,7 +151,14 @@ class SyncService:
 
             page_records: dict[str, Page] = {}
             documents_for_index: list[dict[str, str]] = []
-            for raw_page in raw_pages:
+            for index, raw_page in enumerate(raw_pages, start=1):
+                logger.info(
+                    "processing page %s/%s id=%s title=%s",
+                    index,
+                    len(raw_pages),
+                    raw_page["id"],
+                    raw_page["title"],
+                )
                 markdown_body = storage_to_markdown(raw_page.get("body", ""))
                 markdown_body = resolve_page_placeholders(markdown_body, slug_lookup)
                 summary = self._summarize(markdown_body)
@@ -176,6 +195,11 @@ class SyncService:
                 for attachment in await self.confluence_client.list_attachments(raw_page["id"]):
                     if not attachment.get("download"):
                         continue
+                    logger.debug(
+                        "downloading attachment page_id=%s filename=%s",
+                        raw_page["id"],
+                        attachment["filename"],
+                    )
                     asset_info = await self._materialize_asset(
                         session=session,
                         page_record=page_record,
@@ -188,6 +212,12 @@ class SyncService:
                     if asset_info is not None:
                         downloaded_assets[attachment["filename"]] = asset_info
                         processed_assets += 1
+                        logger.debug(
+                            "downloaded asset page_id=%s filename=%s image=%s",
+                            raw_page["id"],
+                            attachment["filename"],
+                            asset_info.get("is_image"),
+                        )
 
                 markdown_body, inline_image_keys, new_body_assets = await self._replace_body_image_placeholders(
                     session=session,
@@ -198,6 +228,12 @@ class SyncService:
                 )
                 downloaded_assets.update(new_body_assets)
                 processed_assets += len(new_body_assets)
+                if new_body_assets:
+                    logger.debug(
+                        "replaced body images page_id=%s count=%s",
+                        raw_page["id"],
+                        len(new_body_assets),
+                    )
 
                 trailing_images = []
                 for filename, asset_info in downloaded_assets.items():
@@ -295,6 +331,12 @@ class SyncService:
                         "href": f"/spaces/{space_key}/pages/{raw_page['slug']}",
                     }
                 )
+                logger.info(
+                    "processed page id=%s assets=%s summary=%s",
+                    raw_page["id"],
+                    len(downloaded_assets),
+                    bool(summary),
+                )
 
             append_space_log(
                 self.settings.wiki_root,
@@ -346,17 +388,27 @@ class SyncService:
                     )
                     edges.append({"source": source_page.id, "target": target_page.id, "link_type": "wiki"})
 
+            logger.debug("rebuilding materialized views space=%s", space_key)
             self._rebuild_materialized_views(session)
+            logger.debug("rebuilt materialized views space=%s", space_key)
 
             sync_run.status = "success"
             sync_run.processed_pages = len(raw_pages)
             sync_run.processed_assets = processed_assets
             sync_run.finished_at = self._utcnow()
             session.commit()
+            logger.info(
+                "sync complete mode=%s space=%s pages=%s assets=%s",
+                mode,
+                space_key,
+                len(raw_pages),
+                processed_assets,
+            )
 
             return SyncResult(mode=mode, space_key=space_key, processed_pages=len(raw_pages), processed_assets=processed_assets)
         except Exception:
             session.rollback()
+            logger.exception("sync failed mode=%s space=%s", mode, space_key)
             raise
         finally:
             session.close()
@@ -431,6 +483,7 @@ class SyncService:
         if not BODY_IMAGE_PLACEHOLDER_RE.search(markdown_body):
             return markdown_body, set(), {}
 
+        logger.debug("replacing body image placeholders page_id=%s", page_record.confluence_page_id)
         available_assets = dict(downloaded_assets)
         new_body_assets: dict[str, dict[str, str | bool | None]] = {}
         inline_image_keys: set[str] = set()

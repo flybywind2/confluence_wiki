@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 
 from app.core.config import get_settings
 from app.services.sync_service import SyncService
@@ -13,14 +14,24 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap = subparsers.add_parser("bootstrap")
     bootstrap.add_argument("--space", required=True)
     bootstrap.add_argument("--page-id", required=True)
+    bootstrap.add_argument("--verbose", action="store_true")
 
     sync = subparsers.add_parser("sync")
     sync.add_argument("--space", required=True)
+    sync.add_argument("--verbose", action="store_true")
     return parser
+
+
+def configure_logging(verbose: bool) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    configure_logging(args.verbose)
     service = SyncService(settings=get_settings())
 
     if args.command == "bootstrap":

@@ -106,13 +106,19 @@ python -m app.demo_seed
 
 ## CLI 로그와 진행 상황
 
-현재 `python -m app.cli bootstrap ...` 과 `python -m app.cli sync ...` 는 페이지별 진행률을 stdout에 실시간으로 상세 출력하지 않습니다.
+현재 `python -m app.cli bootstrap ...` 과 `python -m app.cli sync ...` 는 기본적으로 진행 로그를 터미널에 출력합니다.
 
-즉, bootstrap 또는 sync를 실행해도 아래와 같은 정보는 기본 CLI 출력으로 계속 보이지 않습니다.
+기본 실행에서는 `INFO` 레벨 로그가 출력됩니다.
 
-- 현재 몇 번째 페이지를 처리 중인지
-- attachment 또는 이미지 몇 개를 받았는지
-- rate limit 대기 중인지
+- 시작: mode, space, root page id 또는 증분 대상 페이지 수
+- 진행: 현재 페이지 `n/N`, page id, title
+- 완료: 처리한 page 수, asset 수
+
+상세 로그가 필요하면 `--verbose` 를 붙이면 됩니다. 이 경우 `DEBUG` 레벨 로그가 함께 출력됩니다.
+
+- attachment 다운로드 시작/완료
+- 본문 이미지 placeholder 치환
+- materialized view 재빌드
 
 운영 중 확인 가능한 위치는 아래와 같습니다.
 
@@ -123,7 +129,14 @@ python -m app.demo_seed
 - 외부 스케줄러 로그
   - PowerShell, cron, 작업 스케줄러에서 실행 종료 코드와 예외 traceback을 수집할 수 있습니다.
 
-주의할 점은, 현재 구현에서는 셸 리다이렉션을 걸어도 페이지 단위 실시간 진행률이 추가로 나오지는 않는다는 점입니다. 지금 기준으로는 `완료 후 기록되는 wiki log + DB sync_runs` 를 운영 확인 수단으로 보는 것이 맞습니다.
+예시:
+
+```bash
+python -m app.cli bootstrap --space DEMO --page-id 123456 --verbose
+python -m app.cli sync --space DEMO --verbose
+```
+
+운영 점검은 `터미널 진행 로그 + log.md + sync_runs` 를 함께 보는 구성이 적절합니다.
 
 ## 운영 순서
 

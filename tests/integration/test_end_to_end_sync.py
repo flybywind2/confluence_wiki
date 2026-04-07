@@ -97,6 +97,52 @@ def test_incremental_sync_creates_markdown_and_graph_artifacts(tmp_path, sample_
     assert (tmp_path / "wiki" / "global" / "graph.json").exists()
 
 
+def test_incremental_sync_emits_progress_logs(tmp_path, sample_settings_dict, caplog):
+    import logging
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(settings=settings, confluence_client=FakeConfluenceClient(), vision_client=FakeVisionClient())
+
+    sync_logger = logging.getLogger("app.services.sync_service")
+    sync_logger.disabled = False
+
+    with caplog.at_level(logging.INFO, logger="app.services.sync_service"):
+        service.run_incremental(space_key="DEMO")
+
+    assert "sync start mode=incremental space=DEMO pages=2" in caplog.text
+    assert "processing page 1/2 id=100 title=Root Page" in caplog.text
+    assert "processing page 2/2 id=200 title=Child Page" in caplog.text
+    assert "sync complete mode=incremental space=DEMO pages=2 assets=0" in caplog.text
+
+
+def test_incremental_sync_emits_verbose_attachment_logs(tmp_path, sample_settings_dict, caplog):
+    import logging
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(include_attachment=True),
+        vision_client=FakeVisionClient(),
+    )
+
+    sync_logger = logging.getLogger("app.services.sync_service")
+    sync_logger.disabled = False
+
+    with caplog.at_level(logging.DEBUG, logger="app.services.sync_service"):
+        service.run_incremental(space_key="DEMO")
+
+    assert "downloading attachment page_id=100 filename=diagram.png" in caplog.text
+    assert "downloaded asset page_id=100 filename=diagram.png image=True" in caplog.text
+
+
 def test_incremental_sync_rebuilds_indexes_from_existing_db_state(tmp_path, sample_settings_dict):
     from app.core.config import Settings
 
