@@ -28,11 +28,16 @@ class TextLLMClient:
     def summarize(self, text: str) -> str:
         if not text.strip():
             return ""
+        system_prompt = (
+            "당신은 Confluence 원문을 위키 인덱스용 한 줄 요약으로 압축하는 시스템입니다. "
+            "추정하지 말고 문서에 명시된 사실만 사용하세요. "
+            "한국어 한 문장으로, 120자 이내로, 핵심 대상과 목적이 드러나게 작성하세요."
+        )
         try:
             completion = self._client().chat.completions.create(
                 model=self.settings.llm_model,
                 messages=[
-                    {"role": "system", "content": "문서를 짧게 한국어로 요약하세요."},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text[:4000]},
                 ],
             )
@@ -45,17 +50,21 @@ class TextLLMClient:
             return ""
         if not self.settings.openai_api_key:
             return self._fallback_fact_card(title, text)
+        system_prompt = (
+            "당신은 Confluence 원문을 주제형 wiki용 fact card로 정리하는 시스템입니다.\n"
+            "규칙:\n"
+            "- 제공된 문서에 없는 내용 추정 금지\n"
+            "- 표는 핵심 항목, 수치, 결론만 남기기\n"
+            "- 이미지 설명은 문맥상 중요한 내용만 반영\n"
+            "- 중복 설명 제거\n"
+            "- 한국어로 작성\n"
+            "출력 섹션은 정확히 다음 다섯 개만 사용하세요: 개요, 핵심 사실, 운영 포인트, 관련 문서, 원문 근거"
+        )
         try:
             completion = self._client().chat.completions.create(
                 model=self.settings.llm_model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "당신은 Confluence 문서를 주제형 위키를 위한 fact card로 정리하는 시스템입니다. "
-                            "추정하지 말고 제공된 문서만 사용하세요. 출력 섹션은 개요, 핵심 사실, 운영 포인트, 원문 근거만 사용하세요."
-                        ),
-                    },
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"제목: {title}\n\n본문:\n{text[:5000]}"},
                 ],
             )
@@ -80,17 +89,21 @@ class TextLLMClient:
                 for item in fact_cards
             ]
         )
+        system_prompt = (
+            "당신은 여러 fact card를 주제형 wiki 문서로 통합하는 시스템입니다.\n"
+            "규칙:\n"
+            "- fact card에 없는 내용 추정 금지\n"
+            "- 같은 사실은 한 번만 정리\n"
+            "- 운영자 관점에서 중요한 차이점과 연결만 남기기\n"
+            "- 원문 문서 링크를 관련 문서와 원문 근거 섹션에 포함하기\n"
+            "- 한국어로 작성\n"
+            "출력 섹션은 정확히 다음 다섯 개만 사용하세요: 개요, 핵심 사실, 운영 포인트, 관련 문서, 원문 근거"
+        )
         try:
             completion = self._client().chat.completions.create(
                 model=self.settings.llm_model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "당신은 Confluence 원문 fact card를 주제형 wiki 문서로 통합하는 시스템입니다. "
-                            "중복 제거, 추정 금지, 제공 근거만 사용. 출력 섹션은 개요, 핵심 사실, 운영 포인트, 관련 문서, 원문 근거만 사용하세요."
-                        ),
-                    },
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Space: {space_key}\n주제: {topic_title}\n\n입력:\n{payload[:9000]}"},
                 ],
             )
@@ -121,14 +134,20 @@ class TextLLMClient:
         if not self.settings.openai_api_key:
             return self._fallback_answer(question, contexts)
 
+        system_prompt = (
+            "당신은 Confluence Wiki assistant입니다.\n"
+            "규칙:\n"
+            "- 제공된 참고 문서에 있는 사실만 사용\n"
+            "- 확실하지 않으면 모른다고 명시\n"
+            "- 문서 간 공통점과 차이점은 분리해서 설명\n"
+            "- 답변은 한국어로 간결하게 작성\n"
+            "- 필요하면 마지막에 '근거 문서:' 한 줄로 핵심 근거 제목만 정리"
+        )
         try:
             completion = self._client().chat.completions.create(
                 model=self.settings.llm_model,
                 messages=[
-                    {
-                        "role": "system",
-                        "content": "당신은 Confluence Wiki 도우미입니다. 반드시 제공된 문서 근거만 사용해 한국어로 간결하게 답변하고, 모르면 모른다고 답하세요.",
-                    },
+                    {"role": "system", "content": system_prompt},
                     {
                         "role": "user",
                         "content": f"질문:\n{question}\n\n참고 문서:\n{context_text}",

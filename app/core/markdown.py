@@ -4,8 +4,10 @@ import re
 from pathlib import Path
 
 from markdown_it import MarkdownIt
+from app.core.knowledge import knowledge_segment
 
-_WIKI_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+_WIKI_LINK_RE = re.compile(r"(?<!\!)\[\[([^\]]+)\]\]")
+_WIKI_EMBED_RE = re.compile(r"!\[\[([^\]]+)\]\]")
 _PAGE_LINK_RE = re.compile(r"\[\[pageid:(?P<page_id>\d+)(?:\|(?P<label>[^\]]+))?\]\]")
 
 
@@ -17,13 +19,21 @@ def resolve_page_placeholders(markdown_text: str, page_lookup: dict[str, tuple[s
         if target is None:
             return label
         space_key, slug = target
-        return f"[[{space_key}/{slug}]]"
+        return f"[[spaces/{space_key}/pages/{slug}|{label}]]"
 
     return _PAGE_LINK_RE.sub(_replace, markdown_text)
 
 
 def extract_wiki_links(markdown_text: str) -> list[str]:
-    return [match.group(1).strip() for match in _WIKI_LINK_RE.finditer(markdown_text)]
+    links: list[str] = []
+    for match in _WIKI_LINK_RE.finditer(markdown_text):
+        target = match.group(1).strip().split("|", 1)[0].strip()
+        if not target:
+            continue
+        if target.startswith("spaces/") and "/assets/" in target:
+            continue
+        links.append(target)
+    return links
 
 
 def strip_frontmatter(content: str) -> str:
@@ -36,16 +46,38 @@ def strip_frontmatter(content: str) -> str:
 
 
 def render_markdown(markdown_text: str) -> str:
-    def _replace(match: re.Match[str]) -> str:
-        target = match.group(1).strip()
-        parts = target.split("/", 1)
+    def _route_for_target(target: str) -> str | None:
+        parts = target.strip("/").split("/")
         if len(parts) == 2:
-            space_key, slug = parts
-            return f"[{slug.replace('-', ' ')}](/spaces/{space_key}/pages/{slug})"
+            return f"/spaces/{parts[0]}/pages/{parts[1]}"
+        if len(parts) >= 4 and parts[0] == "spaces" and parts[2] == "pages":
+            return f"/spaces/{parts[1]}/pages/{parts[3]}"
+        if len(parts) >= 5 and parts[0] == "spaces" and parts[2] == "knowledge":
+            return f"/spaces/{parts[1]}/knowledge/{knowledge_segment(parts[3])}/{parts[4]}"
+        return None
+
+    def _replace_embed(match: re.Match[str]) -> str:
+        target = match.group(1).strip().split("|", 1)[0].strip()
+        parts = target.strip("/").split("/")
+        if len(parts) >= 4 and parts[0] == "spaces" and parts[2] == "assets":
+            filename = parts[3]
+            return f'<img src="/wiki-static/spaces/{parts[1]}/assets/{filename}" alt="{filename}" />'
         return match.group(0)
 
+    def _replace_link(match: re.Match[str]) -> str:
+        raw_target = match.group(1).strip()
+        target, _, label = raw_target.partition("|")
+        target = target.strip()
+        route = _route_for_target(target)
+        if route is None:
+            return match.group(0)
+        display = label.strip() if label.strip() else Path(target).name.replace("-", " ")
+        return f"[{display}]({route})"
+
     parser = MarkdownIt("commonmark", {"html": True, "linkify": True, "breaks": True})
-    return parser.render(_WIKI_LINK_RE.sub(_replace, markdown_text))
+    hydrated = _WIKI_EMBED_RE.sub(_replace_embed, markdown_text)
+    hydrated = _WIKI_LINK_RE.sub(_replace_link, hydrated)
+    return parser.render(hydrated)
 
 
 def read_markdown_body(path: Path) -> str:

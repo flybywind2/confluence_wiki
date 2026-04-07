@@ -11,9 +11,9 @@ def test_append_space_log_does_not_overwrite_newer_entries_when_read_snapshot_is
     log_path.write_text(
         "# DEMO Activity Log\n\n"
         "## [2026-04-07T03:00:00+09:00] sync | DEMO | bootstrap\n"
-        "- pages: [[DEMO/root-page-100]]\n\n"
+        "- pages: [[spaces/DEMO/pages/root-page-100|root-page-100]]\n\n"
         "## [2026-04-07T03:10:00+09:00] sync | DEMO | incremental\n"
-        "- pages: [[DEMO/child-page-200]]\n",
+        "- pages: [[spaces/DEMO/pages/child-page-200|child-page-200]]\n",
         encoding="utf-8",
     )
 
@@ -24,7 +24,7 @@ def test_append_space_log_does_not_overwrite_newer_entries_when_read_snapshot_is
             return (
                 "# DEMO Activity Log\n\n"
                 "## [2026-04-07T03:00:00+09:00] sync | DEMO | bootstrap\n"
-                "- pages: [[DEMO/root-page-100]]\n"
+                "- pages: [[spaces/DEMO/pages/root-page-100|root-page-100]]\n"
             )
         return original_read_text(self, *args, **kwargs)
 

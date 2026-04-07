@@ -19,7 +19,7 @@ from app.services.lint_service import LintService
 
 TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 MARKDOWN_LINK_RE = re.compile(r"\[(?P<label>[^\]]+)\]\((?P<href>[^)]+)\)")
-WIKI_LINK_RE = re.compile(r"\[\[(?P<space>[^/\]]+)/(?P<slug>[^\]]+)\]\]")
+WIKI_LINK_RE = re.compile(r"\[\[(?P<target>[^\]|]+)(?:\|(?P<label>[^\]]+))?\]\]")
 
 
 class WikiQAService:
@@ -260,9 +260,14 @@ class WikiQAService:
                     continue
                 wiki_match = WIKI_LINK_RE.search(line)
                 if wiki_match:
-                    key = (wiki_match.group("space"), "page", wiki_match.group("slug"))
-                    hints[key] = line
-                    continue
+                    target = wiki_match.group("target").strip()
+                    parts = target.strip("/").split("/")
+                    if len(parts) >= 4 and parts[0] == "spaces" and parts[2] == "pages":
+                        hints[(parts[1], "page", parts[3])] = line
+                        continue
+                    if len(parts) >= 5 and parts[0] == "spaces" and parts[2] == "knowledge":
+                        hints[(parts[1], normalize_knowledge_kind(parts[3]), parts[4])] = line
+                        continue
                 link_match = MARKDOWN_LINK_RE.search(line)
                 if not link_match:
                     continue
@@ -392,6 +397,9 @@ class WikiQAService:
     def _excerpt(body: str, tokens: list[str], limit: int = 500) -> str:
         compact = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1 이미지", body)
         compact = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", compact)
+        compact = re.sub(r"!\[\[[^\]]+\]\]", " 이미지 ", compact)
+        compact = re.sub(r"\[\[[^\]|]+\|([^\]]+)\]\]", r"\1", compact)
+        compact = re.sub(r"\[\[([^\]]+)\]\]", r"\1", compact)
         compact = BeautifulSoup(compact, "html.parser").get_text(" ")
         compact = re.sub(r"[#`>*-]+", " ", compact)
         compact = re.sub(r"\s+", " ", compact).strip()

@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
+from app.core.obsidian import asset_embed
+
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
 BODY_IMAGE_PLACEHOLDER_RE = re.compile(r"\[\[confluence-image:(?P<kind>attachment|src):(?P<value>[^|\]]+)\|(?P<alt>[^\]]*)\]\]")
@@ -22,10 +24,19 @@ def save_asset(asset_root: Path, filename: str, content: bytes) -> Path:
 
 
 def build_image_markdown(image_path: str, alt_text: str, caption: str | None) -> str:
-    lines = [f"![{alt_text}]({image_path})"]
+    if image_path.startswith("http://") or image_path.startswith("https://") or image_path.startswith("/"):
+        lines = [f"![{alt_text}]({image_path})"]
+    else:
+        if image_path.startswith("spaces/") and "/assets/" in image_path:
+            space_key = image_path.split("/", 2)[1]
+            filename = image_path.split("/assets/", 1)[1]
+            lines = [asset_embed(space_key, filename)]
+        else:
+            lines = [f"![[{image_path}]]"]
     if caption:
         lines.append("")
-        lines.append(f"> 이미지 설명: {caption}")
+        lines.append("> [!info] 이미지 설명")
+        lines.append(f"> {caption}")
     return "\n".join(lines)
 
 

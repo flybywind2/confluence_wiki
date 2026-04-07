@@ -10,6 +10,7 @@ from sqlalchemy import delete, select
 from app.core.config import Settings, get_settings
 from app.core.knowledge import knowledge_href, normalize_knowledge_kind
 from app.core.markdown import read_markdown_body
+from app.core.obsidian import knowledge_link, page_link
 from app.core.slugs import page_slug
 from app.db.models import KnowledgeDocument, Page, PageLink, Space, WikiDocument
 from app.db.session import create_session_factory
@@ -94,7 +95,7 @@ class KnowledgeService:
                     "",
                     "## 원문",
                     "",
-                    f"- 최신 문서: [원문 문서](/spaces/{space_key}/pages/{page.slug})",
+                    f"- 최신 문서: {page_link(space_key, page.slug, page.title)}",
                     f"- 운영 URL: {page.prod_url}",
                     "",
                     "## 요약",
@@ -191,7 +192,7 @@ class KnowledgeService:
         suffix = uuid.uuid4().hex[:8]
         slug = page_slug(question[:40], suffix)
         title = f"분석: {question[:50]}"
-        source_links = [f"- [{item['title']}]({self._source_href(item)})" for item in sources]
+        source_links = [f"- {self._source_href(item)}" for item in sources]
         body = "\n".join(
             [
                 f"# {title}",
@@ -319,6 +320,8 @@ class KnowledgeService:
             "kind": normalized_kind,
             "slug": slug,
             "title": title,
+            "aliases": [title],
+            "tags": [f"space/{space.space_key}", f"kind/{normalized_kind}", "source/wiki"],
             "source_refs": source_refs or "",
             "updated_at": datetime.now().isoformat(),
         }
@@ -367,7 +370,7 @@ class KnowledgeService:
         top_terms = [token for token, _count in Counter(tokens).most_common(6)]
         lines = [f"# {space_key} 핵심 개념", "", "이 문서는 현재 space의 주요 주제와 연결을 정리한 개념 문서입니다.", "", "## 주요 문서", ""]
         for page, wiki_document in sorted(page_rows, key=lambda item: item[0].title.lower()):
-            lines.append(f"- [{page.title}](/spaces/{space_key}/pages/{page.slug}): {wiki_document.summary or page.title}")
+            lines.append(f"- {page_link(space_key, page.slug, page.title)}: {wiki_document.summary or page.title}")
         lines.extend(["", "## 핵심 키워드", ""])
         if top_terms:
             lines.extend(f"- {term}" for term in top_terms)
@@ -410,12 +413,9 @@ class KnowledgeService:
 
     @staticmethod
     def _source_href(item: dict[str, str]) -> str:
-        href = str(item.get("href") or "").strip()
-        if href:
-            return href
         space_key = str(item.get("space_key") or "").strip()
         slug = str(item.get("slug") or "").strip()
         kind = normalize_knowledge_kind(str(item.get("kind") or "page"))
         if kind == "page":
-            return f"/spaces/{space_key}/pages/{slug}"
-        return knowledge_href(space_key, kind, slug)
+            return page_link(space_key, slug, str(item.get("title") or slug))
+        return knowledge_link(space_key, kind, slug, str(item.get("title") or slug))

@@ -251,9 +251,9 @@ def test_incremental_sync_appends_log_entries_and_creates_synthesis_page(tmp_pat
     synthesis_text = synthesis_path.read_text(encoding="utf-8")
 
     assert log_text.count("sync | DEMO | incremental") == 2
-    assert "[[DEMO/root-page-100]]" in log_text
+    assert "[[spaces/DEMO/pages/root-page-100|Root Page]]" in log_text
     assert "# DEMO Synthesis" in synthesis_text
-    assert "[[DEMO/root-page-100]]" in synthesis_text
+    assert "[[spaces/DEMO/pages/root-page-100|Root Page]]" in synthesis_text
 
 
 def test_incremental_sync_creates_multiple_concept_documents(tmp_path, sample_settings_dict):
@@ -345,9 +345,9 @@ def test_body_images_are_rendered_inline_with_wiki_static_paths(tmp_path, sample
     markdown = (tmp_path / "wiki" / "spaces" / "DEMO" / "pages" / "root-page-100.md").read_text(encoding="utf-8")
 
     assert "앞 문장" in markdown
-    assert "![구성도](/wiki-static/spaces/DEMO/assets/diagram.png)" in markdown
-    assert markdown.index("앞 문장") < markdown.index("![구성도]")
-    assert markdown.index("![구성도]") < markdown.index("뒤 문장")
+    assert "![[spaces/DEMO/assets/diagram.png]]" in markdown
+    assert markdown.index("앞 문장") < markdown.index("![[spaces/DEMO/assets/diagram.png]]")
+    assert markdown.index("![[spaces/DEMO/assets/diagram.png]]") < markdown.index("뒤 문장")
 
 
 def test_body_image_reuses_url_encoded_attachment_filename(tmp_path, sample_settings_dict):
@@ -392,7 +392,7 @@ def test_body_image_reuses_url_encoded_attachment_filename(tmp_path, sample_sett
     finally:
         session.close()
 
-    assert "![구성도](/wiki-static/spaces/DEMO/assets/diagram%20one.png)" in markdown
+    assert "![[spaces/DEMO/assets/diagram one.png]]" in markdown
     assert asset_count == 1
 
 

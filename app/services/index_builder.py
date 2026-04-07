@@ -4,12 +4,15 @@ from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
 
+from app.core.obsidian import knowledge_link, page_link
+from app.services.wiki_writer import write_markdown_file
+
 
 def _doc_reference(doc: dict[str, str], space_key: str) -> str:
-    href = doc.get("href")
-    if href and doc.get("kind") not in {None, "", "page"}:
-        return f"[{doc['title']}]({href})"
-    return f"[[{space_key}/{doc['slug']}]]"
+    title = str(doc.get("title") or doc.get("slug") or "document")
+    if doc.get("kind") not in {None, "", "page"}:
+        return knowledge_link(space_key, str(doc.get("kind") or ""), str(doc["slug"]), title)
+    return page_link(space_key, str(doc["slug"]), title)
 
 
 def build_space_index(
@@ -50,8 +53,15 @@ def build_space_index(
             lines.append(f"- [{doc['title']}]({doc['href']}): {summary}".rstrip(": "))
         lines.append("")
     target = space_root / "index.md"
-    target.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
-    return target
+    return write_markdown_file(
+        target,
+        {
+            "title": f"{space_key} Index",
+            "aliases": [f"{space_key} Index"],
+            "tags": [f"space/{space_key}", "kind/index"],
+        },
+        "\n".join(lines).strip(),
+    )
 
 
 def append_space_log(
@@ -66,7 +76,15 @@ def append_space_log(
     target = space_root / "log.md"
     if not target.exists():
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(f"# {space_key} Activity Log\n", encoding="utf-8")
+        write_markdown_file(
+            target,
+            {
+                "title": f"{space_key} Activity Log",
+                "aliases": [f"{space_key} Activity Log"],
+                "tags": [f"space/{space_key}", "kind/log"],
+            },
+            f"# {space_key} Activity Log",
+        )
 
     lines = [f"## [{timestamp.isoformat()}] sync | {space_key} | {mode}"]
     if window_label:
@@ -111,8 +129,15 @@ def build_space_synthesis(
         lines.append("")
     lines.extend(["## 메모", "", "이 문서는 현재 space의 누적 요약 페이지입니다."])
     target = space_root / "synthesis.md"
-    target.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
-    return target
+    return write_markdown_file(
+        target,
+        {
+            "title": f"{space_key} Synthesis",
+            "aliases": [f"{space_key} Synthesis"],
+            "tags": [f"space/{space_key}", "kind/synthesis"],
+        },
+        "\n".join(lines).strip(),
+    )
 
 
 def build_global_index(root: Path, grouped_documents: dict[str, list[dict[str, str]]]) -> Path:
@@ -129,5 +154,12 @@ def build_global_index(root: Path, grouped_documents: dict[str, list[dict[str, s
                 lines.append(f"- [[{space_key}/{doc['slug']}]]: {summary}".rstrip(": "))
         lines.append("")
     target = global_root / "index.md"
-    target.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
-    return target
+    return write_markdown_file(
+        target,
+        {
+            "title": "Global Wiki Index",
+            "aliases": ["Global Wiki Index"],
+            "tags": ["kind/global-index"],
+        },
+        "\n".join(lines).strip(),
+    )

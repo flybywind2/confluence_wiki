@@ -14,6 +14,7 @@ from sqlalchemy import delete, select
 from app.clients.confluence import ConfluenceClient
 from app.core.config import Settings, get_settings
 from app.core.knowledge import knowledge_href
+from app.core.obsidian import asset_target, page_link
 from app.core.markdown import extract_wiki_links, resolve_page_placeholders
 from app.core.slugs import page_slug
 from app.db.models import Asset, KnowledgeDocument, Page, PageLink, PageVersion, Space, SyncRun, WikiDocument
@@ -241,7 +242,7 @@ class SyncService:
                         continue
                     trailing_images.append(
                         build_image_markdown(
-                            str(asset_info["public_url"]),
+                            str(asset_info.get("vault_path") or asset_info["public_url"]),
                             str(asset_info.get("alt_text") or filename),
                             str(asset_info.get("caption") or "") or None,
                         )
@@ -256,6 +257,8 @@ class SyncService:
                     "parent_page_id": raw_page.get("parent_id"),
                     "title": raw_page["title"],
                     "slug": raw_page["slug"],
+                    "aliases": [raw_page["title"]],
+                    "tags": [f"space/{space_key}", "kind/page", "source/confluence"],
                     "source_url": self._build_prod_url(raw_page),
                     "updated_at": raw_page.get("updated_at"),
                 }
@@ -314,13 +317,13 @@ class SyncService:
                         page_id=page_record.id,
                         markdown_path=markdown_path.relative_to(self.settings.wiki_root).as_posix(),
                         summary=summary,
-                        index_line=f"- [[{space_key}/{raw_page['slug']}]]",
+                        index_line=f"- {page_link(space_key, raw_page['slug'], raw_page['title'])}",
                     )
                     session.add(wiki_document)
                 else:
                     wiki_document.markdown_path = markdown_path.relative_to(self.settings.wiki_root).as_posix()
                     wiki_document.summary = summary
-                    wiki_document.index_line = f"- [[{space_key}/{raw_page['slug']}]]"
+                    wiki_document.index_line = f"- {page_link(space_key, raw_page['slug'], raw_page['title'])}"
 
                 documents_for_index.append(
                     {
@@ -372,7 +375,12 @@ class SyncService:
                 markdown_path = self.settings.wiki_root / "spaces" / space_key / "pages" / f"{raw_page['slug']}.md"
                 markdown_text = markdown_path.read_text(encoding="utf-8")
                 for wiki_link in extract_wiki_links(markdown_text):
-                    target_space, _, target_slug = wiki_link.partition("/")
+                    parts = wiki_link.strip("/").split("/")
+                    if len(parts) >= 4 and parts[0] == "spaces" and parts[2] == "pages":
+                        target_space = parts[1]
+                        target_slug = parts[3]
+                    else:
+                        target_space, _, target_slug = wiki_link.partition("/")
                     if target_space != space_key or not target_slug:
                         continue
                     target_page = known_pages_by_slug.get(target_slug)
@@ -447,6 +455,7 @@ class SyncService:
         is_image = force_image or is_image_filename(safe_filename) or bool((mime_type or "").startswith("image/"))
         caption = self.vision_client.describe_image(local_path) if is_image and self.vision_client else None
         public_url = build_wiki_asset_url(space_key, safe_filename)
+        vault_path = asset_target(space_key, safe_filename)
 
         session.add(
             Asset(
@@ -465,6 +474,7 @@ class SyncService:
         return {
             "filename": safe_filename,
             "public_url": public_url,
+            "vault_path": vault_path,
             "local_path": str(local_path.relative_to(self.settings.wiki_root)),
             "body_path": download_path,
             "is_image": is_image,
@@ -536,7 +546,7 @@ class SyncService:
                 inline_image_keys.add(asset_key)
                 rendered_parts.append(
                     build_image_markdown(
-                        str(asset_info["public_url"]),
+                        str(asset_info.get("vault_path") or asset_info["public_url"]),
                         alt_text,
                         str(asset_info.get("caption") or "") or None,
                     )
