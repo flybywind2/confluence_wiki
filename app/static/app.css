@@ -83,6 +83,32 @@ body {
 }
 .hero-card h1, .page-header h1 { margin: 8px 0 12px; font-size: clamp(1.9rem, 3vw, 2.8rem); }
 .list-card, .page-card, .graph-card { padding: 24px 28px; }
+.facet-card { margin-bottom: 24px; }
+.facet-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 14px;
+}
+.facet-form label {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+.facet-form select,
+.facet-form button {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font: inherit;
+  background: #fffdf8;
+}
+.facet-form button {
+  background: var(--accent);
+  color: #fffaf0;
+  cursor: pointer;
+}
 .page-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
 .page-list li { padding: 14px 0; border-bottom: 1px solid rgba(216, 207, 190, 0.7); }
 .page-list a { color: var(--ink); font-weight: 700; text-decoration: none; }
@@ -159,6 +185,9 @@ body {
 .legend-line { display: inline-block; width: 28px; height: 3px; margin-right: 6px; vertical-align: middle; }
 .legend-line.hierarchy { background: #b45309; }
 .legend-line.wiki { background: #1d4ed8; border-top: 3px dashed #1d4ed8; height: 0; }
+.legend-line.concept-source { background: #0f766e; }
+.legend-line.concept-related { background: #1d4ed8; border-top: 3px dashed #1d4ed8; height: 0; }
+.legend-line.synthesis-concept { background: #334155; }
 
 .assistant-fab {
   position: fixed;

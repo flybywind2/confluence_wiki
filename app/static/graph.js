@@ -3,7 +3,11 @@
   if (!container) return;
 
   const space = container.dataset.space;
-  const query = space && space !== "all" ? `?space=${encodeURIComponent(space)}` : "";
+  const view = container.dataset.view || "knowledge";
+  const params = new URLSearchParams();
+  if (space && space !== "all") params.set("space", space);
+  if (view) params.set("view", view);
+  const query = params.toString() ? `?${params.toString()}` : "";
   const response = await fetch(`/api/graph${query}`);
   const payload = await response.json();
 
@@ -12,7 +16,11 @@
   const svg = d3.select(container).append("svg").attr("viewBox", `0 0 ${width} ${height}`);
 
   const simulation = d3.forceSimulation(payload.nodes)
-    .force("link", d3.forceLink(payload.edges).id(d => d.id).distance(d => d.type === "hierarchy" ? 80 : 130))
+    .force("link", d3.forceLink(payload.edges).id(d => d.id).distance(d => {
+      if (d.type === "hierarchy" || d.type === "synthesis-concept") return 90;
+      if (d.type === "concept-source") return 120;
+      return 140;
+    }))
     .force("charge", d3.forceManyBody().strength(-210))
     .force("center", d3.forceCenter(width / 2, height / 2));
 
@@ -20,9 +28,16 @@
     .selectAll("line")
     .data(payload.edges)
     .join("line")
-    .attr("stroke", d => d.type === "hierarchy" ? "#b45309" : "#1d4ed8")
-    .attr("stroke-width", d => d.type === "hierarchy" ? 2.2 : 1.5)
-    .attr("stroke-dasharray", d => d.type === "hierarchy" ? null : "6 4")
+    .attr("stroke", d => {
+      if (d.type === "hierarchy") return "#b45309";
+      if (d.type === "concept-source") return "#0f766e";
+      if (d.type === "concept-related") return "#1d4ed8";
+      if (d.type === "analysis-concept") return "#9a3412";
+      if (d.type === "synthesis-concept") return "#334155";
+      return "#1d4ed8";
+    })
+    .attr("stroke-width", d => d.type === "hierarchy" || d.type === "synthesis-concept" ? 2.2 : 1.6)
+    .attr("stroke-dasharray", d => d.type === "concept-related" || d.type === "analysis-concept" ? "6 4" : null)
     .attr("stroke-opacity", 0.65);
 
   const node = svg.append("g")
@@ -48,8 +63,8 @@
         })
     )
     .on("click", (_, d) => {
-      if (d.space_key && d.slug) {
-        window.location.href = `/spaces/${d.space_key}/pages/${d.slug}`;
+      if (d.href) {
+        window.location.href = d.href;
       }
     });
 

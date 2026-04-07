@@ -5,15 +5,36 @@
   <div>
     <span class="eyebrow">Obsidian-Style Graph</span>
     <h1>문서 연결 그래프</h1>
-    <p>부모-자식 관계와 문서 내 링크를 동시에 시각화합니다.</p>
+    <p>{% if selected_view == 'knowledge' %}주제 문서, 분석 문서, synthesis와 원문 근거의 연결을 시각화합니다.{% else %}부모-자식 관계와 문서 내 링크를 동시에 시각화합니다.{% endif %}</p>
   </div>
   <div class="legend">
+    {% if selected_view == 'knowledge' %}
+    <span><i class="legend-line concept-source"></i>Concept Source</span>
+    <span><i class="legend-line concept-related"></i>Concept Related</span>
+    <span><i class="legend-line synthesis-concept"></i>Synthesis</span>
+    {% else %}
     <span><i class="legend-line hierarchy"></i>Hierarchy</span>
     <span><i class="legend-line wiki"></i>Wiki Link</span>
+    {% endif %}
   </div>
 </section>
+<section class="list-card facet-card">
+  <form class="facet-form" action="/graph" method="get">
+    {% if selected_space and selected_space != 'all' %}
+    <input type="hidden" name="space" value="{{ selected_space }}" />
+    {% endif %}
+    <label>
+      <span>그래프 보기</span>
+      <select name="view">
+        <option value="knowledge" {% if selected_view == 'knowledge' %}selected{% endif %}>Knowledge Graph</option>
+        <option value="raw" {% if selected_view == 'raw' %}selected{% endif %}>Raw Graph</option>
+      </select>
+    </label>
+    <button type="submit">전환</button>
+  </form>
+</section>
 <section class="graph-card">
-  <div id="graph-canvas" data-space="{{ selected_space }}"></div>
+  <div id="graph-canvas" data-space="{{ selected_space }}" data-view="{{ selected_view }}"></div>
 </section>
 <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
 <script src="/static/graph.js"></script>

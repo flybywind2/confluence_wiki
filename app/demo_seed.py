@@ -11,7 +11,7 @@ from app.core.config import Settings, get_settings
 from app.core.knowledge import knowledge_href
 from app.db.models import Asset, KnowledgeDocument, Page, PageLink, PageVersion, WikiDocument
 from app.db.session import create_session_factory
-from app.graph.builder import build_graph_payload, write_graph_cache
+from app.graph.builder import build_graph_payload, build_knowledge_graph_payload, write_graph_cache, write_named_graph_cache
 from app.services.index_builder import append_space_log, build_global_index, build_space_index, build_space_synthesis, read_space_log_excerpt
 from app.services.knowledge_service import KnowledgeService
 from app.services.lint_service import LintService
@@ -321,6 +321,35 @@ def seed_demo_content(settings: Settings | None = None) -> dict[str, int]:
             for page in page_records_by_confluence_id.values()
         ]
         write_graph_cache(settings.wiki_root, build_graph_payload(graph_nodes, graph_edges))
+        knowledge_documents = []
+        page_documents = []
+        for space_key, docs in documents_by_space.items():
+            page_documents.extend([{**doc, "space_key": space_key} for doc in docs])
+            knowledge_rows = session.scalars(
+                select(KnowledgeDocument).where(KnowledgeDocument.space_id == spaces_by_key[space_key].id)
+            ).all()
+            knowledge_documents.extend(
+                [
+                    {
+                        "title": doc.title,
+                        "slug": doc.slug,
+                        "space_key": space_key,
+                        "kind": doc.kind,
+                        "summary": doc.summary or "",
+                        "href": knowledge_href(space_key, doc.kind, doc.slug),
+                        "source_refs": doc.source_refs or "",
+                    }
+                    for doc in knowledge_rows
+                ]
+            )
+        write_named_graph_cache(
+            settings.wiki_root,
+            "knowledge-graph.json",
+            build_knowledge_graph_payload(
+                knowledge_documents=knowledge_documents,
+                page_documents=page_documents,
+            ),
+        )
 
         session.commit()
         return {"spaces": len(SPACES), "pages": len(PAGES)}

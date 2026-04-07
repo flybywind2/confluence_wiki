@@ -75,3 +75,24 @@ def test_search_prefers_knowledge_docs_and_hides_raw_pages_by_default(tmp_path, 
     assert response.status_code == 200
     assert "동기화 런북" not in response.text
     assert "핵심 개념" in response.text or "분석" in response.text or "Concept" in response.text
+
+
+def test_graph_endpoint_can_return_knowledge_graph_nodes(tmp_path, sample_settings_dict):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+        }
+    )
+    test_app = create_app(settings=settings, allow_test_fallback=False)
+    seed_demo_content(settings=settings)
+    client = TestClient(test_app)
+
+    response = client.get("/api/graph", params={"space": "DEMO", "view": "knowledge"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert any(node.get("kind") == "concept" for node in payload["nodes"])
+    assert all(edge["type"] in {"concept-source", "concept-related", "analysis-concept", "synthesis-concept"} for edge in payload["edges"])

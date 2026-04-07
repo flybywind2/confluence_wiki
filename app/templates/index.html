@@ -23,10 +23,39 @@
   {% endif %}
 </section>
 
+<section class="list-card facet-card">
+  <form class="facet-form" action="{{ filter_action or request.url.path }}" method="get">
+    {% if search_query %}
+    <input type="hidden" name="q" value="{{ search_query }}" />
+    {% endif %}
+    {% if selected_space and selected_space != 'all' and request.url.path == '/search' %}
+    <input type="hidden" name="space" value="{{ selected_space }}" />
+    {% endif %}
+    <label>
+      <span>문서 유형</span>
+      <select name="kind">
+        <option value="all" {% if selected_kind == 'all' %}selected{% endif %}>전체</option>
+        <option value="concept" {% if selected_kind == 'concept' %}selected{% endif %}>개념 문서</option>
+        <option value="analysis" {% if selected_kind == 'analysis' %}selected{% endif %}>분석 문서</option>
+        <option value="lint" {% if selected_kind == 'lint' %}selected{% endif %}>Lint Report</option>
+      </select>
+    </label>
+    <label>
+      <span>최근 변경</span>
+      <select name="recent">
+        <option value="all" {% if selected_recent == 'all' %}selected{% endif %}>전체</option>
+        <option value="7d" {% if selected_recent == '7d' %}selected{% endif %}>최근 7일</option>
+        <option value="30d" {% if selected_recent == '30d' %}selected{% endif %}>최근 30일</option>
+      </select>
+    </label>
+    <button type="submit">필터 적용</button>
+  </form>
+</section>
+
 <section class="list-card">
   <div class="section-header">
     <h2>{% if search_query %}검색 결과{% else %}최근 문서{% endif %}</h2>
-    <span>{{ pages|length }}건</span>
+    <span>{{ pages|length }}건{% if selected_kind and selected_kind != 'all' %} · {{ '개념 문서' if selected_kind == 'concept' else '분석 문서' if selected_kind == 'analysis' else 'Lint Report' }}{% endif %}{% if selected_recent and selected_recent != 'all' %} · {{ selected_recent }}{% endif %}</span>
   </div>
   {% if pages %}
   <ul class="page-list">

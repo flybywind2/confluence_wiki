@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ from sqlalchemy import or_, select
 from app.core.knowledge import knowledge_href, knowledge_label, normalize_knowledge_kind
 from app.core.markdown import read_markdown_body, render_markdown
 from app.db.models import KnowledgeDocument, Page, PageVersion, Space, WikiDocument
-from app.graph.builder import build_graph_payload
+from app.graph.builder import build_graph_payload, build_knowledge_graph_payload
 from app.services.sync_service import SyncService
 from app.services.wiki_qa import WikiQAService
 
@@ -78,16 +79,73 @@ def _is_user_visible_knowledge(doc: KnowledgeDocument) -> bool:
     return normalize_knowledge_kind(doc.kind) in {"concept", "analysis", "lint"}
 
 
-def _load_graph_payload(request: Request, selected_space: str | None = None) -> dict:
-    graph_path = _settings(request).wiki_root / "global" / "graph.json"
+def _parse_recent_days(value: str | None) -> int | None:
+    if not value or value in {"all", ""}:
+        return None
+    normalized = value.strip().lower()
+    if normalized.endswith("d") and normalized[:-1].isdigit():
+        return int(normalized[:-1])
+    return None
+
+
+def _matches_filters(doc: KnowledgeDocument, kind: str | None, recent_days: int | None) -> bool:
+    normalized_kind = normalize_knowledge_kind(doc.kind)
+    if kind and kind not in {"", "all"} and normalized_kind != normalize_knowledge_kind(kind):
+        return False
+    if recent_days is not None:
+        cutoff = datetime.now() - timedelta(days=recent_days)
+        if doc.updated_at < cutoff:
+            return False
+    return True
+
+
+def _load_graph_payload(request: Request, selected_space: str | None = None, view: str = "knowledge") -> dict:
+    filename = "knowledge-graph.json" if view == "knowledge" else "graph.json"
+    graph_path = _settings(request).wiki_root / "global" / filename
     if graph_path.exists():
         payload = json.loads(graph_path.read_text(encoding="utf-8"))
         if not selected_space:
             return payload
+        if view == "knowledge":
+            allowed_ids = {node["id"] for node in payload["nodes"] if node.get("space_key") == selected_space}
+            return {
+                "nodes": [node for node in payload["nodes"] if node["id"] in allowed_ids],
+                "edges": [
+                    edge
+                    for edge in payload["edges"]
+                    if edge["source"] in allowed_ids and edge["target"] in allowed_ids
+                ],
+            }
         return build_graph_payload(payload["nodes"], [{"source": e["source"], "target": e["target"], "link_type": e["type"]} for e in payload["edges"]], selected_space)
 
     session = _session_factory(request)()
     try:
+        if view == "knowledge":
+            knowledge_rows = session.execute(select(KnowledgeDocument, Space).join(Space, Space.id == KnowledgeDocument.space_id)).all()
+            page_rows = session.execute(select(Page, WikiDocument, Space).join(WikiDocument, WikiDocument.page_id == Page.id).join(Space, Space.id == Page.space_id)).all()
+            knowledge_documents = [
+                {
+                    "title": doc.title,
+                    "slug": doc.slug,
+                    "space_key": space.space_key,
+                    "kind": doc.kind,
+                    "summary": doc.summary or "",
+                    "href": knowledge_href(space.space_key, doc.kind, doc.slug),
+                    "source_refs": doc.source_refs or "",
+                }
+                for doc, space in knowledge_rows
+            ]
+            page_documents = [
+                {
+                    "title": page.title,
+                    "slug": page.slug,
+                    "space_key": space.space_key,
+                    "summary": wiki_document.summary or "",
+                    "href": f"/spaces/{space.space_key}/pages/{page.slug}",
+                }
+                for page, wiki_document, space in page_rows
+            ]
+            return build_knowledge_graph_payload(knowledge_documents, page_documents, selected_space)
         pages = session.scalars(select(Page)).all()
         nodes = [{"id": page.id, "title": page.title, "space_key": page.space.space_key, "slug": page.slug} for page in pages]
         return build_graph_payload(nodes, [])
@@ -96,7 +154,12 @@ def _load_graph_payload(request: Request, selected_space: str | None = None) -> 
 
 
 @router.get("/", response_class=HTMLResponse)
-async def index(request: Request, space: str | None = None) -> HTMLResponse:
+async def index(
+    request: Request,
+    space: str | None = None,
+    kind: str | None = None,
+    recent: str | None = None,
+) -> HTMLResponse:
     session = _session_factory(request)()
     try:
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
@@ -104,10 +167,11 @@ async def index(request: Request, space: str | None = None) -> HTMLResponse:
         if space and space != "all":
             knowledge_query = knowledge_query.where(Space.space_key == space)
         knowledge_rows = session.execute(knowledge_query).all()
+        recent_days = _parse_recent_days(recent)
         pages = [
             _knowledge_result_item(doc, doc_space.space_key)
             for doc, doc_space in knowledge_rows
-            if _is_user_visible_knowledge(doc)
+            if _is_user_visible_knowledge(doc) and _matches_filters(doc, kind, recent_days)
         ]
         pages.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
         pages = pages[:20]
@@ -119,7 +183,10 @@ async def index(request: Request, space: str | None = None) -> HTMLResponse:
                 "spaces": spaces,
                 "selected_space": space or "all",
                 "pages": pages,
+                "selected_kind": normalize_knowledge_kind(kind) if kind and kind != "all" else "all",
+                "selected_recent": recent or "all",
                 "synthesis_href": f"/spaces/{space}/synthesis" if space and space != "all" else None,
+                "filter_action": request.url.path,
                 "meta_description": _meta_description(
                     f"{(space or '전체')} space 문서 홈입니다. 최근 문서 {len(pages)}건을 표시합니다."
                 ),
@@ -130,8 +197,13 @@ async def index(request: Request, space: str | None = None) -> HTMLResponse:
 
 
 @router.get("/spaces/{space_key}", response_class=HTMLResponse)
-async def space_index(request: Request, space_key: str) -> HTMLResponse:
-    return await index(request, space=space_key)
+async def space_index(
+    request: Request,
+    space_key: str,
+    kind: str | None = Query(default=None),
+    recent: str | None = Query(default=None),
+) -> HTMLResponse:
+    return await index(request, space=space_key, kind=kind, recent=recent)
 
 
 @router.get("/spaces/{space_key}/knowledge/{kind}/{slug}", response_class=HTMLResponse)
@@ -337,7 +409,13 @@ async def page_view(request: Request, space_key: str, slug: str) -> HTMLResponse
 
 
 @router.get("/search", response_class=HTMLResponse)
-async def search(request: Request, q: str = Query(default=""), space: str | None = None) -> HTMLResponse:
+async def search(
+    request: Request,
+    q: str = Query(default=""),
+    space: str | None = None,
+    kind: str | None = None,
+    recent: str | None = None,
+) -> HTMLResponse:
     session = _session_factory(request)()
     try:
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
@@ -354,10 +432,11 @@ async def search(request: Request, q: str = Query(default=""), space: str | None
                 )
             )
             knowledge_rows = session.execute(knowledge_query.limit(50)).all()
+            recent_days = _parse_recent_days(recent)
             results = [
                 _knowledge_result_item(doc, doc_space.space_key)
                 for doc, doc_space in knowledge_rows
-                if _is_user_visible_knowledge(doc)
+                if _is_user_visible_knowledge(doc) and _matches_filters(doc, kind, recent_days)
             ]
             results.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
         return _templates(request).TemplateResponse(
@@ -369,7 +448,10 @@ async def search(request: Request, q: str = Query(default=""), space: str | None
                 "selected_space": space or "all",
                 "pages": results,
                 "search_query": q,
+                "selected_kind": normalize_knowledge_kind(kind) if kind and kind != "all" else "all",
+                "selected_recent": recent or "all",
                 "synthesis_href": f"/spaces/{space}/synthesis" if space and space != "all" else None,
+                "filter_action": request.url.path,
                 "meta_description": _meta_description(
                     f"검색어 {q} 에 대한 결과 {len(results)}건입니다. 범위는 {(space or '전체 위키')} 입니다."
                 ),
@@ -380,7 +462,7 @@ async def search(request: Request, q: str = Query(default=""), space: str | None
 
 
 @router.get("/graph", response_class=HTMLResponse)
-async def graph_page(request: Request, space: str | None = None) -> HTMLResponse:
+async def graph_page(request: Request, space: str | None = None, view: str = Query(default="knowledge")) -> HTMLResponse:
     session = _session_factory(request)()
     try:
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
@@ -391,6 +473,7 @@ async def graph_page(request: Request, space: str | None = None) -> HTMLResponse
                 "request": request,
                 "spaces": spaces,
                 "selected_space": space or "all",
+                "selected_view": view if view in {"knowledge", "raw"} else "knowledge",
                 "meta_description": _meta_description(
                     f"{(space or '전체')} 범위 문서 연결 그래프를 표시합니다."
                 ),
@@ -438,8 +521,9 @@ async def api_search(request: Request, q: str = Query(default=""), space: str | 
 
 
 @router.get("/api/graph")
-async def api_graph(request: Request, space: str | None = None) -> dict:
-    return _load_graph_payload(request, None if space in {None, "", "all"} else space)
+async def api_graph(request: Request, space: str | None = None, view: str = Query(default="raw")) -> dict:
+    normalized_view = view if view in {"knowledge", "raw"} else "raw"
+    return _load_graph_payload(request, None if space in {None, "", "all"} else space, normalized_view)
 
 
 @router.get("/api/pages/{space_key}/{slug}")

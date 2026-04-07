@@ -389,13 +389,14 @@ class KnowledgeService:
         concepts: list[dict[str, str]] = []
         for topic, items in sorted(groups.items()):
             title = f"{space_key} {topic}"
+            synthesized = self.text_client.synthesize_concept(space_key, title, items)
             concepts.append(
                 {
                     "slug": page_slug(topic, len(items)),
                     "title": title,
-                    "summary": items[0]["summary"],
-                    "body": self.text_client.synthesize_concept(space_key, title, items),
-                    "source_refs": [item["href"] for item in items],
+                    "summary": self._cluster_summary(topic, items),
+                    "body": self._ensure_cluster_sections(space_key, title, items, synthesized),
+                    "source_refs": [page_link(space_key, item["slug"], item["title"]) for item in items],
                 }
             )
         return concepts
@@ -419,3 +420,52 @@ class KnowledgeService:
         if kind == "page":
             return page_link(space_key, slug, str(item.get("title") or slug))
         return knowledge_link(space_key, kind, slug, str(item.get("title") or slug))
+
+    @staticmethod
+    def _cluster_summary(topic: str, items: list[dict[str, str]]) -> str:
+        titles = ", ".join(item["title"] for item in items[:2])
+        if len(items) > 2:
+            titles = f"{titles} 외 {len(items) - 2}건"
+        return f"{topic} 주제에서 확인할 핵심 문서: {titles}"
+
+    def _ensure_cluster_sections(
+        self,
+        space_key: str,
+        title: str,
+        items: list[dict[str, str]],
+        body: str,
+    ) -> str:
+        section_requirements = {
+            "## 개요": self._default_overview(space_key, title, items),
+            "## 핵심 사실": "\n".join(f"- {item['title']}: {item['summary']}" for item in items) or "- 정보 없음",
+            "## 운영 포인트": "\n".join(f"- {item['title']} 문서 기준 운영 포인트 확인" for item in items[:3]),
+            "## 대표 문서": "\n".join(self._page_reference(space_key, item) for item in items[: min(2, len(items))]),
+            "## 관련 문서": "\n".join(self._page_reference(space_key, item) for item in items),
+            "## 남은 질문": "\n".join(self._default_open_questions(items)),
+            "## 원문 근거": "\n".join(self._page_reference(space_key, item) for item in items),
+        }
+        normalized = body.strip()
+        if not normalized.startswith("# "):
+            normalized = f"# {title}\n\n{normalized}".strip()
+        for section, fallback_content in section_requirements.items():
+            if section not in normalized:
+                normalized += f"\n\n{section}\n\n{fallback_content}"
+        return normalized.strip()
+
+    @staticmethod
+    def _default_overview(space_key: str, title: str, items: list[dict[str, str]]) -> str:
+        if not items:
+            return f"{space_key} space의 {title} 관련 문서를 묶은 개념 문서입니다."
+        return f"{space_key} space에서 {title} 주제를 빠르게 파악할 수 있도록 관련 원문을 묶어 정리한 문서입니다."
+
+    @staticmethod
+    def _default_open_questions(items: list[dict[str, str]]) -> list[str]:
+        doc_names = ", ".join(item["title"] for item in items[:2]) if items else "관련 문서"
+        return [
+            f"- {doc_names} 사이의 책임 경계와 운영 순서가 최신 상태로 유지되는지 확인이 필요합니다.",
+            "- 최근 변경 이후에도 관련 지표, 런북, 정책 문서가 서로 일관되는지 검토가 필요합니다.",
+        ]
+
+    @staticmethod
+    def _page_reference(space_key: str, item: dict[str, str]) -> str:
+        return f"- {page_link(space_key, item['slug'], item['title'])}"

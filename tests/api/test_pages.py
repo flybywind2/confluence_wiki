@@ -47,6 +47,20 @@ def test_search_page_shows_query_context_and_result_count(tmp_path, sample_setti
     assert "핵심 개념" in response.text or "운영과 런북" in response.text
 
 
+def test_space_home_can_filter_by_kind_and_recent_group(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    response = client.get("/spaces/DEMO", params={"kind": "concept", "recent": "7d"})
+
+    assert response.status_code == 200
+    assert "개념 문서" in response.text
+    assert "DEMO Lint Report" not in response.text
+
+
 def test_search_page_shows_empty_state_for_no_results(tmp_path, sample_settings_dict):
     sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
     sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")

@@ -19,7 +19,7 @@ from app.core.markdown import extract_wiki_links, resolve_page_placeholders
 from app.core.slugs import page_slug
 from app.db.models import Asset, KnowledgeDocument, Page, PageLink, PageVersion, Space, SyncRun, WikiDocument
 from app.db.session import create_session_factory
-from app.graph.builder import build_graph_payload, write_graph_cache
+from app.graph.builder import build_graph_payload, build_knowledge_graph_payload, write_graph_cache, write_named_graph_cache
 from app.llm.text_client import TextLLMClient
 from app.llm.vision_client import VisionClient
 from app.parser.storage import storage_to_markdown
@@ -565,6 +565,8 @@ class SyncService:
         space_lookup = {space.id: space.space_key for space in session.scalars(select(Space)).all()}
         knowledge_service = KnowledgeService(self.settings)
         lint_service = LintService(self.settings)
+        all_page_documents: list[dict[str, str]] = []
+        all_knowledge_documents: list[dict[str, str]] = []
         for space_id, space_key in sorted(space_lookup.items(), key=lambda item: item[1]):
             knowledge_service.rebuild_space_with_session(session, space_key)
             lint_service.rebuild_space_with_session(session, space_key)
@@ -580,6 +582,7 @@ class SyncService:
                 {
                     "title": page.title,
                     "slug": page.slug,
+                    "space_key": space_key,
                     "updated_at": page.updated_at_remote.isoformat() if page.updated_at_remote else "",
                     "summary": _wiki_document.summary or "",
                     "href": f"/spaces/{space_key}/pages/{page.slug}",
@@ -590,13 +593,17 @@ class SyncService:
                 {
                     "title": doc.title,
                     "slug": doc.slug,
+                    "space_key": space_key,
                     "kind": doc.kind,
                     "summary": doc.summary or "",
                     "href": knowledge_href(space_key, doc.kind, doc.slug),
+                    "source_refs": doc.source_refs or "",
                 }
                 for doc in knowledge_rows
             ]
             grouped_documents[space_key] = [*documents, *knowledge_documents]
+            all_page_documents.extend(documents)
+            all_knowledge_documents.extend(knowledge_documents)
             build_space_index(self.settings.wiki_root, space_key, documents, knowledge_documents)
             build_space_synthesis(
                 self.settings.wiki_root,
@@ -625,6 +632,14 @@ class SyncService:
             if link.target_page_id in page_id_lookup and link.source_page_id in page_id_lookup
         ]
         write_graph_cache(self.settings.wiki_root, build_graph_payload(nodes=nodes, edges=edges))
+        write_named_graph_cache(
+            self.settings.wiki_root,
+            "knowledge-graph.json",
+            build_knowledge_graph_payload(
+                knowledge_documents=all_knowledge_documents,
+                page_documents=all_page_documents,
+            ),
+        )
 
     @staticmethod
     def _parse_datetime(value: str | None) -> datetime | None:

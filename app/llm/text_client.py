@@ -95,9 +95,11 @@ class TextLLMClient:
             "- fact card에 없는 내용 추정 금지\n"
             "- 같은 사실은 한 번만 정리\n"
             "- 운영자 관점에서 중요한 차이점과 연결만 남기기\n"
-            "- 원문 문서 링크를 관련 문서와 원문 근거 섹션에 포함하기\n"
+            "- 대표 문서는 이 주제를 가장 빠르게 이해하는 데 필요한 원문만 고르기\n"
+            "- 남은 질문은 문서에 없는 사실을 추정하지 말고, 문서 정합성이나 운영 검토 포인트만 적기\n"
+            "- 원문 문서 링크를 대표 문서, 관련 문서, 원문 근거 섹션에 포함하기\n"
             "- 한국어로 작성\n"
-            "출력 섹션은 정확히 다음 다섯 개만 사용하세요: 개요, 핵심 사실, 운영 포인트, 관련 문서, 원문 근거"
+            "출력 섹션은 정확히 다음 일곱 개만 사용하세요: 개요, 핵심 사실, 운영 포인트, 대표 문서, 관련 문서, 남은 질문, 원문 근거"
         )
         try:
             completion = self._client().chat.completions.create(
@@ -196,6 +198,7 @@ class TextLLMClient:
 
     @staticmethod
     def _fallback_concept(space_key: str, topic_title: str, fact_cards: list[dict[str, str]]) -> str:
+        representative = fact_cards[: min(2, len(fact_cards))]
         lines = [
             f"# {topic_title}",
             "",
@@ -209,8 +212,13 @@ class TextLLMClient:
         lines.extend(f"- {item['title']}: {item['summary']}" for item in fact_cards)
         lines.extend(["", "## 운영 포인트", ""])
         lines.extend(f"- {item['title']} 참고" for item in fact_cards[:3])
+        lines.extend(["", "## 대표 문서", ""])
+        lines.extend(f"- [[spaces/{space_key}/pages/{item['slug']}|{item['title']}]]" for item in representative)
         lines.extend(["", "## 관련 문서", ""])
-        lines.extend(f"- [{item['title']}]({item['href']})" for item in fact_cards)
+        lines.extend(f"- [[spaces/{space_key}/pages/{item['slug']}|{item['title']}]]" for item in fact_cards)
+        lines.extend(["", "## 남은 질문", ""])
+        lines.append("- 문서 간 책임 경계와 최신 운영 절차가 일관되게 유지되는지 확인이 필요합니다.")
+        lines.append("- 관련 지표, 런북, 정책 문서가 최근 변경 이후에도 서로 맞물리는지 검토가 필요합니다.")
         lines.extend(["", "## 원문 근거", ""])
-        lines.extend(f"- [{item['title']}]({item['href']})" for item in fact_cards)
+        lines.extend(f"- [[spaces/{space_key}/pages/{item['slug']}|{item['title']}]]" for item in fact_cards)
         return "\n".join(lines).strip()
