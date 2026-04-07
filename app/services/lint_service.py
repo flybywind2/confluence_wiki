@@ -75,6 +75,19 @@ class LintService:
             for doc in knowledge_docs
             if doc.kind == "keyword" and len(self._knowledge_source_page_keys(doc.source_refs)) <= 1
         ]
+        topic_overlaps: list[tuple[KnowledgeDocument, KnowledgeDocument, float]] = []
+        keyword_docs = [doc for doc in knowledge_docs if doc.kind == "keyword"]
+        for index, left in enumerate(keyword_docs):
+            left_sources = set(self._knowledge_source_page_keys(left.source_refs))
+            if not left_sources:
+                continue
+            for right in keyword_docs[index + 1 :]:
+                right_sources = set(self._knowledge_source_page_keys(right.source_refs))
+                if not right_sources:
+                    continue
+                overlap_ratio = len(left_sources.intersection(right_sources)) / max(len(left_sources.union(right_sources)), 1)
+                if overlap_ratio >= 0.6:
+                    topic_overlaps.append((left, right, overlap_ratio))
         dangling_knowledge = [doc for doc in knowledge_docs if doc.kind in {"analysis", "query"} and not (doc.source_refs or "").strip()]
         global_index_path = self.settings.wiki_root / "global" / "index.md"
 
@@ -97,6 +110,11 @@ class LintService:
         lines.extend(["", "## Low Coverage Topics", ""])
         lines.extend(
             [f"- {doc.title} · source pages {len(self._knowledge_source_page_keys(doc.source_refs))}" for doc in low_coverage_topics]
+            or ["- 없음"]
+        )
+        lines.extend(["", "## Topic Overlap", ""])
+        lines.extend(
+            [f"- {left.title} ↔ {right.title} · overlap {ratio:.0%}" for left, right, ratio in topic_overlaps]
             or ["- 없음"]
         )
         lines.extend(["", "## Query And Analysis Gaps", ""])

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -454,9 +455,31 @@ class SyncService:
 
     def _summarize(self, markdown_body: str) -> str:
         if self.text_client:
-            return self.text_client.summarize(markdown_body)
+            summary = (self.text_client.summarize(markdown_body) or "").strip()
+            if summary and not summary.startswith("#"):
+                return summary[:180]
+        fallback = self._first_summary_sentence(markdown_body)
+        if fallback:
+            return fallback[:180]
         first_line = next((line.strip() for line in markdown_body.splitlines() if line.strip()), "")
-        return first_line[:180]
+        return re.sub(r"^\s*#{1,6}\s*", "", first_line).strip()[:180]
+
+    @staticmethod
+    def _first_summary_sentence(markdown_body: str) -> str:
+        for raw_line in markdown_body.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith(("![[", "![", "|", "```")):
+                continue
+            cleaned = re.sub(r"^\s*[-*>]+\s*", "", stripped)
+            cleaned = re.sub(r"\[(?P<label>[^\]]+)\]\((?P<href>[^)]+)\)", lambda match: match.group("label"), cleaned)
+            cleaned = re.sub(r"!\[\[(?P<embed>[^\]]+)\]\]|\[\[(?P<target>[^\]|]+)(?:\|(?P<label>[^\]]+))?\]\]", lambda match: match.group("label") or match.group("target") or "", cleaned)
+            cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:|")
+            if cleaned:
+                return cleaned
+        return ""
 
     def _build_prod_url(self, raw_page: dict) -> str:
         if hasattr(self.confluence_client, "build_page_url"):

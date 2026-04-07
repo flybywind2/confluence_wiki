@@ -379,6 +379,36 @@ def test_keyword_page_contains_related_docs_and_related_keywords(tmp_path, sampl
     assert "## 관련 주제" in content
 
 
+def test_keyword_page_key_facts_use_real_content_instead_of_title_only_summary(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100"],
+            title_overrides={"100": "AI Portal 운영 점검"},
+            body_overrides={
+                "100": (
+                    "<h1>AI Portal 운영 현황</h1>"
+                    "<p>AI Portal 인증 흐름과 장애 대응 절차를 정리합니다.</p>"
+                )
+            },
+        ),
+    )
+
+    service.run_incremental(space_key="DEMO")
+
+    keyword_page = tmp_path / "wiki" / "global" / "knowledge" / "keywords" / "ai-portal.md"
+    content = keyword_page.read_text(encoding="utf-8")
+
+    assert "- AI Portal 운영 점검: AI Portal 인증 흐름과 장애 대응 절차를 정리합니다." in content
+    assert "- AI Portal 운영 점검: # AI Portal 운영 현황" not in content
+
+
 def test_ds_department_terms_normalize_without_display_guess(tmp_path, sample_settings_dict):
     from app.core.config import Settings
 

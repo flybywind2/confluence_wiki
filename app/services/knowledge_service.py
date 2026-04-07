@@ -104,6 +104,7 @@ WEAK_SINGLE_TOPIC_KEYS = {
     "분야",
     "상태",
     "설명",
+    "상세히",
     "소개",
     "요약",
     "운영",
@@ -168,6 +169,7 @@ WEAK_SINGLE_TOPIC_KEYS = {
     "제공",
     "향후",
     "형성",
+    "반복적",
 }
 STRONG_SINGLE_TOPIC_KEYS = {
     "architecture",
@@ -471,7 +473,8 @@ class KnowledgeService:
 
     def rebuild_global_with_session(self, session) -> list[KnowledgeDocument]:
         global_space = ensure_global_knowledge_space(session)
-        existing_keyword_topics = self._existing_keyword_topics(session, global_space.id)
+        existing_keyword_topics = self._existing_topic_context(session, global_space.id)
+        wiki_state = self._build_wiki_state_snapshot(session, existing_keyword_topics)
 
         session.execute(
             delete(KnowledgeDocument).where(
@@ -486,9 +489,6 @@ class KnowledgeService:
             .join(Space, Space.id == Page.space_id)
             .where(Space.space_key != GLOBAL_KNOWLEDGE_SPACE_KEY)
         ).all()
-        inbound_link_counts = Counter(
-            target_id for target_id in session.scalars(select(PageLink.target_page_id)).all() if target_id is not None
-        )
         docs: list[KnowledgeDocument] = []
         fact_cards: list[dict[str, str]] = []
 
@@ -513,7 +513,7 @@ class KnowledgeService:
                 }
             )
 
-        for keyword in self._build_keyword_documents(fact_cards, existing_keyword_topics):
+        for keyword in self._build_keyword_documents(fact_cards, existing_keyword_topics, wiki_state):
             docs.append(
                 self._upsert_document(
                     session=session,
@@ -708,13 +708,31 @@ class KnowledgeService:
         ranked.sort(key=lambda item: (-item[0], item[1]["title"].lower()))
         items = [payload for _score, payload in ranked[:max_documents]]
         notify(68, f"관련 raw 문서 {len(items)}건을 주제 문서로 정리하는 중입니다.")
+        wiki_state = self._build_wiki_state_snapshot(session)
         related_keywords = self._related_topics_from_items(session, items, exclude_title=normalized_query)
-        body = self.text_client.synthesize_topic_page(
-            ", ".join(sorted({item["space_key"] for item in items})),
-            normalized_query,
-            items,
-            related_keywords,
-            prefer_llm=False,
+        existing_doc = session.scalar(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.space_id == global_space.id,
+                KnowledgeDocument.kind == "query",
+                KnowledgeDocument.slug == self._keyword_slug(normalized_query),
+            )
+        )
+        existing_body = self._document_body(existing_doc) if existing_doc is not None else ""
+        topic_type = self.text_client.classify_topic_type(
+            topic=normalized_query,
+            supporting_documents=items,
+            existing_content=existing_body,
+            wiki_state=wiki_state,
+        )
+        body = self.text_client.update_topic_page(
+            space_key=", ".join(sorted({item["space_key"] for item in items})),
+            topic=normalized_query,
+            topic_type=topic_type,
+            existing_content=existing_body,
+            new_evidence=items,
+            related_topics=related_keywords,
+            wiki_state=wiki_state,
+            prefer_llm=True,
         )
         notify(85, "위키 문서를 저장하는 중입니다.")
         doc = self._upsert_document(
@@ -871,6 +889,16 @@ class KnowledgeService:
                 recent_log_entries=read_space_log_excerpt(self.settings.wiki_root, current_space.space_key),
             )
         build_global_index(self.settings.wiki_root, grouped_documents, knowledge_docs)
+        write_global_document(
+            self.settings.wiki_root,
+            "wiki-state.md",
+            self._build_wiki_state_snapshot(session),
+            {
+                "title": "Wiki State Snapshot",
+                "aliases": ["Wiki State Snapshot"],
+                "tags": ["kind/wiki-state"],
+            },
+        )
 
     def _upsert_document(
         self,
@@ -920,6 +948,26 @@ class KnowledgeService:
         doc.source_refs = source_refs
         session.flush()
         return doc
+
+    def _document_body(self, doc: KnowledgeDocument | None) -> str:
+        if doc is None or not doc.markdown_path:
+            return ""
+        markdown_path = self.settings.wiki_root / doc.markdown_path
+        if not markdown_path.exists():
+            return ""
+        return read_markdown_body(markdown_path)
+
+    @staticmethod
+    def _knowledge_source_page_keys(source_refs: str | None) -> list[tuple[str, str]]:
+        if not source_refs:
+            return []
+        pattern = re.compile(r"(?:/spaces/|spaces/)(?P<space_key>[^/\]]+)/pages/(?P<slug>[^|\]\s)]+)")
+        refs: list[tuple[str, str]] = []
+        for match in pattern.finditer(str(source_refs or "")):
+            ref = ((match.group("space_key") or "").strip(), (match.group("slug") or "").strip())
+            if ref[0] and ref[1] and ref not in refs:
+                refs.append(ref)
+        return refs
 
     @staticmethod
     def _first_line(body: str) -> str:
@@ -973,7 +1021,15 @@ class KnowledgeService:
         exclude_key = self._normalize_topic_key(exclude_title)
         for item in items:
             signal = self._extract_keyword_signal(item["space_key"], item["title"], item.get("summary", ""), item.get("body", ""))
-            for topic in self._select_keywords_for_page(signal, {self._normalize_topic_key(value): value for value in existing_topics}):
+            for topic in self.text_client.propose_topics_for_document(
+                page_title=str(signal["page_title"]),
+                page_summary=str(signal["page_summary"] or ""),
+                body_excerpt=str(item.get("body", ""))[:3000],
+                existing_topics=list(existing_topics),
+                wiki_state="",
+                candidate_topics=self._candidate_topics_from_signal(signal),
+                minimum_count=1,
+            ):
                 if self._normalize_topic_key(topic) == exclude_key:
                     continue
                 related[topic] += 1
@@ -982,7 +1038,8 @@ class KnowledgeService:
     def _build_keyword_documents(
         self,
         fact_cards: list[dict[str, str]],
-        existing_topics: dict[str, str],
+        existing_topics: dict[str, dict[str, str]],
+        wiki_state: str,
     ) -> list[dict[str, str]]:
         if not fact_cards:
             return []
@@ -990,9 +1047,18 @@ class KnowledgeService:
         total_scores: Counter[str] = Counter()
         doc_counts: Counter[str] = Counter()
         selected_topics_by_slug: dict[str, list[str]] = {}
+        existing_topic_titles = [topic["title"] for topic in existing_topics.values()]
         for item in fact_cards:
             signal = item["keyword_signal"]
-            selected_topics = self._select_keywords_for_page(signal, existing_topics)
+            selected_topics = self.text_client.propose_topics_for_document(
+                page_title=str(signal["page_title"]),
+                page_summary=str(signal["page_summary"] or ""),
+                body_excerpt=str(item.get("body", ""))[:5000],
+                existing_topics=existing_topic_titles,
+                wiki_state=wiki_state,
+                candidate_topics=self._candidate_topics_from_signal(signal),
+                minimum_count=self._minimum_proposed_topic_count(int(signal.get("doc_length") or 0)),
+            )
             selected_topics_by_slug[item["slug"]] = selected_topics
             candidates: dict[str, PhraseCandidate] = signal["candidates"]  # type: ignore[assignment]
             for topic in selected_topics:
@@ -1019,12 +1085,22 @@ class KnowledgeService:
         ):
             related_topics = [candidate for candidate, _count in co_occurrence.get(topic, Counter()).most_common(6)]
             source_spaces = [item["space_key"] for item in items]
-            synthesized = self.text_client.synthesize_topic_page(
-                ", ".join(sorted(set(source_spaces))),
-                topic,
-                items,
-                related_topics,
-                prefer_llm=False,
+            existing_topic = existing_topics.get(self._normalize_topic_key(topic), {})
+            topic_type = self.text_client.classify_topic_type(
+                topic=topic,
+                supporting_documents=items,
+                existing_content=str(existing_topic.get("body") or ""),
+                wiki_state=wiki_state,
+            )
+            synthesized = self.text_client.update_topic_page(
+                space_key=", ".join(sorted(set(source_spaces))),
+                topic=topic,
+                topic_type=topic_type,
+                existing_content=str(existing_topic.get("body") or ""),
+                new_evidence=items,
+                related_topics=related_topics,
+                wiki_state=wiki_state,
+                prefer_llm=True,
             )
             documents.append(
                 {
@@ -1096,9 +1172,10 @@ class KnowledgeService:
         body: str,
     ) -> str:
         source_spaces = sorted({item["space_key"] for item in items})
+        key_fact_lines = self._render_keyword_fact_lines(items)
         section_requirements = {
             "## 개요": self._default_keyword_overview(title, items),
-            "## 핵심 사실": "\n".join(f"- {item['title']}: {item['summary']}" for item in items) or "- 정보 없음",
+            "## 핵심 사실": key_fact_lines,
             "## 관련 문서": "\n".join(self._page_reference(item) for item in items),
             "## 관련 주제": "\n".join(
                 f"- {knowledge_link('keyword', self._keyword_slug(keyword), keyword)}" for keyword in related_keywords if keyword != title
@@ -1111,12 +1188,120 @@ class KnowledgeService:
         if not normalized.startswith("# "):
             normalized = f"# {title}\n\n{normalized}".strip()
         normalized = self._upsert_markdown_section(normalized, "## 개요", section_requirements["## 개요"], replace_existing=False)
-        normalized = self._upsert_markdown_section(normalized, "## 핵심 사실", section_requirements["## 핵심 사실"], replace_existing=False)
+        normalized = self._upsert_markdown_section(normalized, "## 핵심 사실", section_requirements["## 핵심 사실"], replace_existing=True)
         normalized = self._upsert_markdown_section(normalized, "## 참고 Space", section_requirements["## 참고 Space"], replace_existing=True)
         normalized = self._upsert_markdown_section(normalized, "## 관련 문서", section_requirements["## 관련 문서"], replace_existing=True)
         normalized = self._upsert_markdown_section(normalized, "## 관련 주제", section_requirements["## 관련 주제"], replace_existing=True)
         normalized = self._upsert_markdown_section(normalized, "## 원문 근거", section_requirements["## 원문 근거"], replace_existing=True)
         return normalized.strip()
+
+    def _render_keyword_fact_lines(self, items: list[dict[str, str]]) -> str:
+        lines: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            title = str(item.get("title") or "").strip()
+            detail = self._best_fact_detail(item)
+            line = f"- {title}: {detail}" if title and detail else (f"- {title}" if title else "")
+            if not line or line in seen:
+                continue
+            seen.add(line)
+            lines.append(line)
+        return "\n".join(lines) or "- 정보 없음"
+
+    def _best_fact_detail(self, item: dict[str, str]) -> str:
+        title = str(item.get("title") or "")
+        for candidate in (
+            self._extract_fact_card_detail(str(item.get("fact_card") or ""), title),
+            self._extract_body_detail(str(item.get("body") or ""), title),
+            self._normalize_fact_text(str(item.get("summary") or ""), title),
+        ):
+            if candidate:
+                return candidate
+        return ""
+
+    def _extract_fact_card_detail(self, fact_card: str, title: str) -> str:
+        for headings in (("## 핵심 사실", "## Key Facts"), ("## 개요", "## Overview")):
+            section = self._extract_markdown_section(fact_card, headings)
+            detail = self._extract_fact_fragment(section, title)
+            if detail:
+                return detail
+        return ""
+
+    def _extract_body_detail(self, body: str, title: str) -> str:
+        return self._extract_fact_fragment(body, title, skip_headings=True)
+
+    def _extract_fact_fragment(self, text: str, title: str, *, skip_headings: bool = False) -> str:
+        if not text.strip():
+            return ""
+        for raw_line in text.splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if skip_headings and stripped.startswith("#"):
+                continue
+            if MARKDOWN_TABLE_SEPARATOR_RE.match(stripped):
+                continue
+            if stripped.startswith(("|", "![[", "![", "```")):
+                continue
+            stripped = re.sub(r"^[>\-\*\d\.\)\s]+", "", stripped).strip()
+            cleaned = self._normalize_fact_text(stripped, title)
+            if cleaned:
+                return cleaned
+            for fragment in BODY_FRAGMENT_SPLIT_RE.split(stripped):
+                cleaned = self._normalize_fact_text(fragment, title)
+                if cleaned:
+                    return cleaned
+        return ""
+
+    @classmethod
+    def _extract_markdown_section(cls, markdown: str, headings: tuple[str, ...]) -> str:
+        if not markdown.strip():
+            return ""
+        heading_keys = {heading.strip().lower() for heading in headings}
+        capture = False
+        section_lines: list[str] = []
+        for raw_line in markdown.splitlines():
+            stripped = raw_line.strip()
+            if stripped.startswith("## "):
+                current_heading = stripped.lower()
+                if capture and current_heading not in heading_keys:
+                    break
+                if current_heading in heading_keys:
+                    capture = True
+                    continue
+            if capture:
+                section_lines.append(raw_line)
+        return "\n".join(section_lines).strip()
+
+    @classmethod
+    def _normalize_fact_text(cls, text: str, title: str) -> str:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return ""
+        normalized = MARKDOWN_LINK_RE.sub(lambda match: match.group("label"), normalized)
+        normalized = WIKI_LINK_RE.sub(cls._replace_wiki_link_with_label, normalized)
+        normalized = re.sub(r"`([^`]*)`", r"\1", normalized)
+        normalized = re.sub(r"^\s*#{1,6}\s*", "", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip(" -:|")
+        if not normalized or normalized == "정보 없음":
+            return ""
+        title_key = cls._normalize_topic_key(title)
+        text_key = cls._normalize_topic_key(normalized)
+        if text_key and text_key == title_key:
+            return ""
+        if normalized.startswith("#"):
+            return ""
+        return normalized[:240]
+
+    @staticmethod
+    def _replace_wiki_link_with_label(match: re.Match[str]) -> str:
+        if match.group("embed"):
+            return ""
+        label = match.group("label")
+        target = match.group("target") or ""
+        if label:
+            return label
+        return target.rsplit("/", 1)[-1]
 
     @staticmethod
     def _upsert_markdown_section(markdown: str, heading: str, content: str, *, replace_existing: bool) -> str:
@@ -1144,15 +1329,52 @@ class KnowledgeService:
         return f"- {reference}"
 
     def _existing_keyword_topics(self, session, space_id: int) -> dict[str, str]:
+        return {
+            key: value["title"]
+            for key, value in self._existing_topic_context(session, space_id).items()
+        }
+
+    def _existing_topic_context(self, session, space_id: int) -> dict[str, dict[str, str]]:
         existing_docs = session.scalars(
             select(KnowledgeDocument).where(KnowledgeDocument.space_id == space_id, KnowledgeDocument.kind == "keyword")
         ).all()
-        topics: dict[str, str] = {}
+        topics: dict[str, dict[str, str]] = {}
         for doc in existing_docs:
             if not doc.title:
                 continue
-            topics[self._normalize_topic_key(doc.title)] = doc.title
+            topics[self._normalize_topic_key(doc.title)] = {
+                "title": doc.title,
+                "body": self._document_body(doc),
+                "source_refs": doc.source_refs or "",
+                "slug": doc.slug,
+            }
         return topics
+
+    def _build_wiki_state_snapshot(self, session, existing_topics: dict[str, dict[str, str]] | None = None) -> str:
+        global_space = ensure_global_knowledge_space(session)
+        docs = self.list_documents(session, global_space.id)
+        topic_context = existing_topics or self._existing_topic_context(session, global_space.id)
+        lines = ["# Wiki State Snapshot", "", "## Wiki topics", ""]
+        for _key, topic in sorted(topic_context.items(), key=lambda item: item[1]["title"].lower())[:40]:
+            source_page_count = len(self._knowledge_source_page_keys(topic.get("source_refs", "")))
+            lines.append(f"- {topic['title']} · source pages {source_page_count}")
+        if len(lines) == 4:
+            lines.append("- 아직 정리된 topic이 없습니다.")
+        lines.extend(["", "## Recent documents", ""])
+        for doc in docs[:12]:
+            source_spaces = ", ".join(source_space_keys(doc.source_refs))
+            suffix = f" · sources {source_spaces}" if source_spaces else ""
+            lines.append(f"- {doc.title} ({doc.kind}){suffix}")
+        visible_spaces = session.scalars(
+            select(Space).where(Space.space_key != GLOBAL_KNOWLEDGE_SPACE_KEY).order_by(Space.space_key)
+        ).all()
+        log_entries: list[str] = []
+        for space in visible_spaces[:6]:
+            for entry in read_space_log_excerpt(self.settings.wiki_root, space.space_key, limit=1):
+                log_entries.append(f"[{space.space_key}] {entry}")
+        lines.extend(["", "## Recent activity", ""])
+        lines.extend([f"- {entry}" for entry in log_entries] or ["- 최근 활동 로그가 없습니다."])
+        return "\n".join(lines).strip()
 
     def _extract_keyword_signal(self, space_key: str, title: str, summary: str, body: str) -> dict[str, object]:
         normalized_title = self._apply_phrase_normalization(title)
@@ -1234,6 +1456,41 @@ class KnowledgeService:
             existing_topics=list(existing_topics.values()),
             minimum_count=minimum_count,
         )
+
+    def _candidate_topics_from_signal(self, signal: dict[str, object], limit: int = 20) -> list[str]:
+        candidates: dict[str, PhraseCandidate] = signal["candidates"]  # type: ignore[assignment]
+        ordered = sorted(
+            (candidate for candidate in candidates.values() if self._is_candidate_usable(candidate)),
+            key=lambda item: (-item.token_count, -item.score, -item.occurrences, item.display.lower()),
+        )
+        phrase_candidates = [candidate for candidate in ordered if candidate.token_count > 1]
+        single_candidates = [candidate for candidate in ordered if candidate.token_count == 1]
+        topics: list[str] = []
+        max_length = max(len(phrase_candidates), len(single_candidates))
+        for index in range(max_length):
+            if index < len(phrase_candidates):
+                candidate = phrase_candidates[index]
+                if candidate.display not in topics:
+                    topics.append(candidate.display)
+            if len(topics) >= limit:
+                break
+            if index < len(single_candidates):
+                candidate = single_candidates[index]
+                if candidate.display not in topics:
+                    topics.append(candidate.display)
+            if len(topics) >= limit:
+                break
+        return topics
+
+    @staticmethod
+    def _minimum_proposed_topic_count(doc_length: int) -> int:
+        if doc_length <= 400:
+            return 2
+        if doc_length <= 2000:
+            return 4
+        if doc_length <= 8000:
+            return 6
+        return 8
 
     @staticmethod
     def _is_candidate_usable(candidate: PhraseCandidate) -> bool:

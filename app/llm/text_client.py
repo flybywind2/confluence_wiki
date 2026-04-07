@@ -160,6 +160,58 @@ class TextLLMClient:
             "- If useful, end with one short evidence line using a Korean label for source documents."
         )
 
+    # 한국어 번역:
+    # - 기존 wiki 상태와 현재 문서를 함께 보고, 이 문서가 기여해야 할 주제를 고른다.
+    # - 기존 topic이 맞으면 반드시 기존 이름을 재사용한다.
+    # - 후보는 규칙 기반 후보를 참고하되, 의미적으로 더 적절한 기존 topic이 있으면 그쪽을 택한다.
+    # - 결과는 JSON만 반환한다.
+    def _topic_proposal_system_prompt(self) -> str:
+        return (
+            "You are the wiki topic editor for an evolving knowledge base.\n"
+            "Rules:\n"
+            "- Look at the current wiki state, the existing topic inventory, and the source document together.\n"
+            "- Reuse an existing topic title whenever the document clearly contributes to that topic.\n"
+            "- Use candidate topics only as hints, not as mandatory choices.\n"
+            "- Prefer stable, meaningful topic names over temporary phrases.\n"
+            "- Treat 'Samsung DS', 'DS Division', and 'Device Solutions' as the DS division.\n"
+            "- If the source does not explicitly mention 'display', do not reinterpret it as display or Samsung Display.\n"
+            "- Respond in Korean only when returning any natural-language field.\n"
+            "- Return JSON only in the form {\"topics\": [\"topic one\", \"topic two\"]}.\n"
+            "- Return between minimum_count and 8 topics when enough strong candidates exist."
+        )
+
+    # 한국어 번역:
+    # - 주제 페이지의 성격을 분류해서 적절한 집필 틀을 고른다.
+    # - 결과는 JSON만 반환한다.
+    def _topic_type_system_prompt(self) -> str:
+        return (
+            "You classify the editorial type of a wiki topic page.\n"
+            "Choose exactly one topic type from: concept, entity, process, decision_log, comparison.\n"
+            "Treat 'Samsung DS', 'DS Division', and 'Device Solutions' as the DS division.\n"
+            "If the source does not explicitly mention 'display', do not reinterpret it as display or Samsung Display.\n"
+            "Return JSON only in the form {\"topic_type\": \"concept\"}."
+        )
+
+    # 한국어 번역:
+    # - 기존 topic page를 새 근거로 갱신한다.
+    # - 기존 내용은 가능한 유지하되, 중복은 제거하고 새 근거를 통합한다.
+    # - 모순이나 빈 곳이 있으면 명시한다.
+    # - 결과는 한국어 markdown이다.
+    def _topic_update_system_prompt(self) -> str:
+        return (
+            "You are maintaining a long-lived wiki page.\n"
+            "Your job is to update the existing topic page with new evidence instead of rewriting it from scratch.\n"
+            "Rules:\n"
+            "- Preserve useful existing structure and facts when they are still supported.\n"
+            "- Integrate new evidence without repeating the same point.\n"
+            "- If documents disagree, mention the disagreement explicitly.\n"
+            "- If the evidence is still incomplete, say what remains unclear.\n"
+            "- Treat 'Samsung DS', 'DS Division', and 'Device Solutions' as the DS division.\n"
+            "- If the source does not explicitly mention 'display', do not reinterpret it as display or Samsung Display.\n"
+            "- Respond in Korean markdown.\n"
+            "- Use a structure appropriate to the topic type instead of forcing one fixed template."
+        )
+
     def summarize(self, text: str) -> str:
         if not text.strip():
             return ""
@@ -310,6 +362,158 @@ class TextLLMClient:
         except Exception:
             return self._fallback_answer(question, contexts)
 
+    def propose_topics_for_document(
+        self,
+        *,
+        page_title: str,
+        page_summary: str,
+        body_excerpt: str,
+        existing_topics: list[str],
+        wiki_state: str,
+        candidate_topics: list[str],
+        minimum_count: int = 1,
+    ) -> list[str]:
+        if not self.settings.openai_api_key:
+            return self._fallback_propose_topics_for_document(
+                page_title=page_title,
+                page_summary=page_summary,
+                body_excerpt=body_excerpt,
+                existing_topics=existing_topics,
+                candidate_topics=candidate_topics,
+                minimum_count=minimum_count,
+            )
+        payload = {
+            "page_title": page_title,
+            "page_summary": page_summary,
+            "body_excerpt": body_excerpt[:5000],
+            "existing_topics": existing_topics[:120],
+            "candidate_topics": candidate_topics[:24],
+            "minimum_count": minimum_count,
+            "wiki_state": wiki_state[:4000],
+        }
+        try:
+            completion = self._client().chat.completions.create(
+                model=self.settings.llm_model,
+                messages=[
+                    {"role": "system", "content": self._topic_proposal_system_prompt()},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2)},
+                ],
+            )
+            content = completion.choices[0].message.content or ""
+            selected = self._parse_topic_selection(content, [{"topic": item} for item in [*candidate_topics, *existing_topics]])
+            if selected:
+                return selected[:5]
+        except Exception:
+            pass
+        return self._fallback_propose_topics_for_document(
+            page_title=page_title,
+            page_summary=page_summary,
+            body_excerpt=body_excerpt,
+            existing_topics=existing_topics,
+            candidate_topics=candidate_topics,
+            minimum_count=minimum_count,
+        )
+
+    def classify_topic_type(
+        self,
+        *,
+        topic: str,
+        supporting_documents: list[dict[str, str]],
+        existing_content: str = "",
+        wiki_state: str = "",
+    ) -> str:
+        if not self.settings.openai_api_key:
+            return self._fallback_classify_topic_type(topic=topic, existing_content=existing_content)
+        payload = {
+            "topic": topic,
+            "supporting_documents": [
+                {
+                    "title": item.get("title", ""),
+                    "summary": item.get("summary", ""),
+                }
+                for item in supporting_documents[:8]
+            ],
+            "existing_content": existing_content[:3000],
+            "wiki_state": wiki_state[:3000],
+        }
+        try:
+            completion = self._client().chat.completions.create(
+                model=self.settings.llm_model,
+                messages=[
+                    {"role": "system", "content": self._topic_type_system_prompt()},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2)},
+                ],
+            )
+            content = completion.choices[0].message.content or ""
+            parsed = json.loads(content)
+            topic_type = str(parsed.get("topic_type") or "").strip()
+            if topic_type in {"concept", "entity", "process", "decision_log", "comparison"}:
+                return topic_type
+        except Exception:
+            pass
+        return self._fallback_classify_topic_type(topic=topic, existing_content=existing_content)
+
+    def update_topic_page(
+        self,
+        *,
+        space_key: str,
+        topic: str,
+        topic_type: str,
+        existing_content: str,
+        new_evidence: list[dict[str, str]],
+        related_topics: list[str],
+        wiki_state: str,
+        prefer_llm: bool = True,
+    ) -> str:
+        if not new_evidence:
+            return existing_content.strip()
+        if not prefer_llm or not self.settings.openai_api_key:
+            return self._fallback_update_topic_page(
+                space_key=space_key,
+                topic=topic,
+                topic_type=topic_type,
+                existing_content=existing_content,
+                new_evidence=new_evidence,
+                related_topics=related_topics,
+            )
+        payload = {
+            "space_key": space_key,
+            "topic": topic,
+            "topic_type": topic_type,
+            "existing_content": existing_content[:7000],
+            "related_topics": related_topics[:8],
+            "wiki_state": wiki_state[:4000],
+            "new_evidence": [
+                {
+                    "title": item.get("title", ""),
+                    "summary": item.get("summary", ""),
+                    "fact_card": item.get("fact_card", ""),
+                }
+                for item in new_evidence[:10]
+            ],
+        }
+        try:
+            completion = self._client().chat.completions.create(
+                model=self.settings.llm_model,
+                messages=[
+                    {"role": "system", "content": self._topic_update_system_prompt()},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2)},
+                ],
+            )
+            content = (completion.choices[0].message.content or "").strip()
+            if content:
+                return content
+        except Exception:
+            pass
+        return self._fallback_update_topic_page(
+            space_key=space_key,
+            topic=topic,
+            topic_type=topic_type,
+            existing_content=existing_content,
+            new_evidence=new_evidence,
+            related_topics=related_topics,
+        )
+
     @classmethod
     def _parse_topic_selection(cls, content: str, candidates: list[dict[str, object]]) -> list[str]:
         candidate_titles = {str(item["topic"]): str(item["topic"]) for item in candidates}
@@ -423,6 +627,112 @@ class TextLLMClient:
             lines.append("")
             lines.append("함께 참고한 문서:")
             lines.extend(f"- {item['space_key']}: {item['title']}" for item in contexts[1:])
+        return "\n".join(lines).strip()
+
+    @classmethod
+    def _fallback_propose_topics_for_document(
+        cls,
+        *,
+        page_title: str,
+        page_summary: str,
+        body_excerpt: str,
+        existing_topics: list[str],
+        candidate_topics: list[str],
+        minimum_count: int,
+    ) -> list[str]:
+        combined = " ".join([page_title, page_summary, body_excerpt]).lower()
+        selected: list[str] = []
+        for topic in sorted(existing_topics, key=lambda item: (-len(item.split()), item.lower())):
+            parts = [part.lower() for part in topic.split() if part.strip()]
+            if parts and all(part in combined for part in parts):
+                selected.append(topic)
+        for topic in candidate_topics:
+            if topic not in selected:
+                selected.append(topic)
+        if minimum_count > 0 and len(selected) < minimum_count:
+            title_tokens = [token for token in page_title.split() if token.strip()]
+            fallback_topic = " ".join(title_tokens[:2]).strip()
+            if fallback_topic and fallback_topic not in selected:
+                selected.append(fallback_topic)
+        filtered: list[str] = []
+        for topic in selected:
+            lower_topic = topic.lower()
+            short_ascii_topic = lower_topic.isascii() and len(lower_topic) <= 2
+            shadowed_by_phrase = any(
+                lower_topic in {part.lower() for part in other.split()}
+                for other in selected
+                if other != topic and len(other.split()) > 1
+            )
+            if len(lower_topic.split()) == 1:
+                if shadowed_by_phrase and (
+                    lower_topic in {item.lower() for item in WEAK_TOPIC_COMPONENTS}
+                    or short_ascii_topic
+                    or (topic.isascii() and not topic.isupper())
+                ):
+                    continue
+            filtered.append(topic)
+        selected = filtered or selected
+        target_count = max(minimum_count, min(len(selected), 10))
+        return selected[: max(1, target_count)]
+
+    @staticmethod
+    def _fallback_classify_topic_type(*, topic: str, existing_content: str = "") -> str:
+        normalized = f"{topic} {existing_content}".lower()
+        if any(token in normalized for token in ["vs", "비교", "차이"]):
+            return "comparison"
+        if any(token in normalized for token in ["회의", "결정", "decision", "로그"]):
+            return "decision_log"
+        if any(token in normalized for token in ["절차", "runbook", "흐름", "process", "가이드"]):
+            return "process"
+        if len(topic.split()) <= 2 and topic[:1].isupper():
+            return "entity"
+        return "concept"
+
+    @classmethod
+    def _fallback_update_topic_page(
+        cls,
+        *,
+        space_key: str,
+        topic: str,
+        topic_type: str,
+        existing_content: str,
+        new_evidence: list[dict[str, str]],
+        related_topics: list[str],
+    ) -> str:
+        overview_lines = [
+            f"{space_key} 범위의 raw 문서를 바탕으로 '{topic}' 주제를 누적 정리한 문서입니다."
+        ]
+        if existing_content.strip():
+            overview_lines.append("기존 정리 내용을 유지하면서 새 근거를 통합했습니다.")
+
+        heading_map = {
+            "concept": ("## 개요", "## 핵심 사실", "## 관련 문서", "## 관련 주제", "## 원문 근거"),
+            "entity": ("## 개요", "## 정체", "## 핵심 사실", "## 관련 문서", "## 원문 근거"),
+            "process": ("## 개요", "## 절차 포인트", "## 운영 주의점", "## 관련 문서", "## 원문 근거"),
+            "decision_log": ("## 배경", "## 결정 사항", "## 후속 조치", "## 관련 문서", "## 원문 근거"),
+            "comparison": ("## 비교 개요", "## 공통점", "## 차이점", "## 관련 문서", "## 원문 근거"),
+        }
+        headings = heading_map.get(topic_type, heading_map["concept"])
+        evidence_lines = [f"- {item['title']}: {item['summary']}" for item in new_evidence]
+        related_lines = [f"- {item}" for item in related_topics] or ["- 관련 주제가 아직 충분히 정리되지 않았습니다."]
+        source_lines = [
+            f"- [[spaces/{item['space_key']}/pages/{item['slug']}|{item['title']}]]"
+            for item in new_evidence
+        ]
+        section_bodies = {
+            headings[0]: "\n".join(overview_lines),
+            headings[1]: "\n".join(evidence_lines) or "- 정보 없음",
+            headings[2]: "\n".join(
+                f"- [[spaces/{item['space_key']}/pages/{item['slug']}|{item['title']}]]"
+                for item in new_evidence
+            )
+            or "- 관련 문서 없음",
+            headings[3]: "\n".join(related_lines),
+            headings[4]: "\n".join(source_lines) or "- 원문 근거 없음",
+        }
+        lines = [f"# {topic}", ""]
+        for heading in headings:
+            lines.extend([heading, "", section_bodies[heading], ""])
         return "\n".join(lines).strip()
 
     @staticmethod
