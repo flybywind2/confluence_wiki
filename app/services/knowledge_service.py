@@ -13,6 +13,7 @@ from app.core.markdown import read_markdown_body
 from app.core.slugs import page_slug
 from app.db.models import KnowledgeDocument, Page, PageLink, Space, WikiDocument
 from app.db.session import create_session_factory
+from app.llm.text_client import TextLLMClient
 from app.services.index_builder import append_space_log, build_global_index, build_space_index
 from app.services.wiki_writer import write_knowledge_markdown
 
@@ -34,6 +35,7 @@ class KnowledgeService:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.session_factory = create_session_factory(self.settings.database_url)
+        self.text_client = TextLLMClient(self.settings)
 
     def rebuild_space(self, space_key: str) -> list[KnowledgeDocument]:
         session = self.session_factory()
@@ -67,11 +69,23 @@ class KnowledgeService:
             target_id for target_id in session.scalars(select(PageLink.target_page_id)).all() if target_id is not None
         )
         docs: list[KnowledgeDocument] = []
+        fact_cards: list[dict[str, str]] = []
 
         for page, wiki_document in page_rows:
             markdown_path = self.settings.wiki_root / wiki_document.markdown_path
             body = read_markdown_body(markdown_path) if markdown_path.exists() else ""
             summary = wiki_document.summary or self._first_line(body)
+            fact_card = self.text_client.summarize_fact_card(page.title, body)
+            fact_cards.append(
+                {
+                    "title": page.title,
+                    "slug": page.slug,
+                    "summary": summary or page.title,
+                    "href": f"/spaces/{space_key}/pages/{page.slug}",
+                    "fact_card": fact_card,
+                    "body": body,
+                }
+            )
             entity_body = "\n".join(
                 [
                     f"# {page.title}",
@@ -86,6 +100,10 @@ class KnowledgeService:
                     "## 요약",
                     "",
                     summary or "요약 없음",
+                    "",
+                    "## fact card",
+                    "",
+                    fact_card or "fact card 없음",
                     "",
                     "## 상태",
                     "",
@@ -119,6 +137,19 @@ class KnowledgeService:
                 source_refs="\n".join(f"/spaces/{space_key}/pages/{page.slug}" for page, _ in page_rows),
             )
         )
+        for concept in self._build_cluster_concepts(space_key, fact_cards):
+            docs.append(
+                self._upsert_document(
+                    session=session,
+                    space=space,
+                    kind="concept",
+                    slug=concept["slug"],
+                    title=concept["title"],
+                    summary=concept["summary"],
+                    body=concept["body"],
+                    source_refs="\n".join(concept["source_refs"]),
+                )
+            )
         return docs
 
     def save_analysis(
@@ -343,6 +374,39 @@ class KnowledgeService:
         else:
             lines.append("- 키워드 추출 결과가 부족합니다.")
         return "\n".join(lines)
+
+    def _build_cluster_concepts(self, space_key: str, fact_cards: list[dict[str, str]]) -> list[dict[str, str]]:
+        if len(fact_cards) < 2:
+            return []
+        groups: dict[str, list[dict[str, str]]] = {}
+        for item in fact_cards:
+            topic = self._classify_topic(item["title"], item["summary"], item["body"])
+            groups.setdefault(topic, []).append(item)
+
+        concepts: list[dict[str, str]] = []
+        for topic, items in sorted(groups.items()):
+            title = f"{space_key} {topic}"
+            concepts.append(
+                {
+                    "slug": page_slug(topic, len(items)),
+                    "title": title,
+                    "summary": items[0]["summary"],
+                    "body": self.text_client.synthesize_concept(space_key, title, items),
+                    "source_refs": [item["href"] for item in items],
+                }
+            )
+        return concepts
+
+    @staticmethod
+    def _classify_topic(title: str, summary: str, body: str) -> str:
+        text = f"{title} {summary} {body}".lower()
+        if any(token in text for token in ("런북", "장애", "재시도", "배치", "동기화", "sync")):
+            return "운영과 런북"
+        if any(token in text for token in ("대시보드", "지표", "sla", "경보", "모니터")):
+            return "운영 지표와 모니터링"
+        if any(token in text for token in ("권한", "정책", "보안", "인증")):
+            return "권한과 정책"
+        return "핵심 주제"
 
     @staticmethod
     def _source_href(item: dict[str, str]) -> str:

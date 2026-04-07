@@ -256,6 +256,34 @@ def test_incremental_sync_appends_log_entries_and_creates_synthesis_page(tmp_pat
     assert "[[DEMO/root-page-100]]" in synthesis_text
 
 
+def test_incremental_sync_creates_multiple_concept_documents(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100", "200"],
+            title_overrides={"100": "운영 대시보드", "200": "동기화 런북"},
+            body_overrides={
+                "100": "<h1>운영 대시보드</h1><p>핵심 지표, 경보, SLA를 설명합니다.</p>",
+                "200": "<h1>동기화 런북</h1><p>배치 실행, 장애 대응, 재시도 절차를 설명합니다.</p>",
+            },
+        ),
+    )
+
+    service.run_incremental(space_key="DEMO")
+
+    concept_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "concepts"
+    concept_files = sorted(path.name for path in concept_root.glob("*.md"))
+
+    assert "core-topics.md" in concept_files
+    assert len(concept_files) >= 2
+
+
 def test_page_slug_stays_stable_when_title_changes(tmp_path, sample_settings_dict):
     from app.core.config import Settings
 

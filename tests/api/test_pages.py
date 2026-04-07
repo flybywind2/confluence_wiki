@@ -44,7 +44,7 @@ def test_search_page_shows_query_context_and_result_count(tmp_path, sample_setti
     assert response.status_code == 200
     assert "검색 결과" in response.text
     assert "런북" in response.text
-    assert "동기화 런북" in response.text
+    assert "핵심 개념" in response.text or "운영과 런북" in response.text
 
 
 def test_search_page_shows_empty_state_for_no_results(tmp_path, sample_settings_dict):

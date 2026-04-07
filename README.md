@@ -15,6 +15,8 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 - append-only `log.md` 운영 로그
 - space별 `synthesis.md` 누적 요약 페이지
 - `knowledge/entities`, `knowledge/concepts`, `knowledge/analyses`, `knowledge/lint` 지식 레이어
+- 기본 UI는 `concept`, `analysis`, `lint`, `synthesis` 중심의 knowledge-first 노출
+- raw Confluence page는 내부 근거와 direct URL용으로 유지
 - 복잡한 표는 HTML fallback
 - 이미지 로컬 저장 + VLM 기반 한국어 설명
 - Obsidian 스타일 graph view
@@ -30,7 +32,7 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 - wiki: markdown 파일 기반 영속 위키
 - schema: [AGENTS.md](./AGENTS.md)
 
-질문 응답도 일회성 채팅으로 끝내지 않고 `knowledge/analyses/` 아래 markdown로 저장해 다시 위키의 일부로 관리합니다.
+질문 응답도 일회성 채팅으로 끝내지 않고 `knowledge/analyses/` 아래 markdown로 저장해 다시 위키의 일부로 관리합니다. 사용자가 기본 UI에서 보는 것은 raw page 목록이 아니라 knowledge 문서 계층입니다.
 
 ## 환경 변수
 
@@ -297,7 +299,8 @@ Payload 예시:
 ## 화면
 
 - `문서 홈`: Space별 최근 문서와 synthesis 링크
-- `문서 상세`: 원문 링크, 현재 버전, 최근 history 링크
+- `문서 홈`: Space별 knowledge 문서와 synthesis 링크
+- `문서 상세`: knowledge 문서 중심, 필요 시 원문 링크와 raw 근거 링크 사용
 - `문서 이력`: 버전 목록과 과거 snapshot 조회
 - `Synthesis`: Space별 누적 요약 페이지
 - `Knowledge`: entity / concept / analysis / lint 문서 렌더링
@@ -313,7 +316,7 @@ Payload 예시:
 
 ## LLM Knowledge Layer
 
-이 프로젝트는 raw Confluence snapshot만 저장하지 않습니다. gist 방향에 맞춰 `raw page layer` 위에 `knowledge layer`를 같이 유지합니다.
+이 프로젝트는 raw Confluence snapshot만 저장하지 않습니다. gist 방향에 맞춰 `raw page layer` 위에 `knowledge layer`를 같이 유지하고, UI는 knowledge-first로 동작합니다.
 
 - raw page layer:
   - 최신 원문 markdown
@@ -325,7 +328,7 @@ Payload 예시:
   - assistant 저장 analysis 문서
   - lint report
 
-assistant가 찾는 근거는 raw page와 knowledge 문서를 함께 사용합니다. 저장된 analysis 문서는 이후 질문에서도 근거로 재활용됩니다.
+assistant가 찾는 근거는 `knowledge 우선, raw fallback` 순서를 따릅니다. 저장된 analysis 문서는 이후 질문에서도 근거로 재활용됩니다.
 
 ## Assistant Answer Save Flow
 

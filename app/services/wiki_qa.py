@@ -131,6 +131,39 @@ class WikiQAService:
         index_hints = self._load_index_hints(scope, selected_space)
         ranked: list[tuple[int, dict[str, str]]] = []
 
+        for doc, space in knowledge_rows:
+            markdown_path = self.settings.wiki_root / doc.markdown_path
+            if not markdown_path.exists():
+                continue
+            body = read_markdown_body(markdown_path)
+            normalized_kind = normalize_knowledge_kind(doc.kind)
+            hint = index_hints.get((space.space_key, normalized_kind, doc.slug), "")
+            score = self._score_candidate(
+                tokens=question_tokens,
+                title=doc.title,
+                slug=doc.slug,
+                body=body,
+                summary=doc.summary or "",
+                hint=hint,
+                source_refs=doc.source_refs or "",
+            )
+            if question_tokens and score == 0:
+                continue
+            ranked.append(
+                (
+                    score + 50,
+                    {
+                        "title": doc.title,
+                        "space_key": space.space_key,
+                        "slug": doc.slug,
+                        "kind": normalized_kind,
+                        "href": knowledge_href(space.space_key, normalized_kind, doc.slug),
+                        "source_url": knowledge_href(space.space_key, normalized_kind, doc.slug),
+                        "excerpt": self._excerpt(body, question_tokens),
+                    },
+                )
+            )
+
         for page, wiki_document, space in page_rows:
             markdown_path = self.settings.wiki_root / wiki_document.markdown_path
             if not markdown_path.exists():
@@ -158,39 +191,6 @@ class WikiQAService:
                         "kind": "page",
                         "href": f"/spaces/{space.space_key}/pages/{page.slug}",
                         "source_url": page.prod_url,
-                        "excerpt": self._excerpt(body, question_tokens),
-                    },
-                )
-            )
-
-        for doc, space in knowledge_rows:
-            markdown_path = self.settings.wiki_root / doc.markdown_path
-            if not markdown_path.exists():
-                continue
-            body = read_markdown_body(markdown_path)
-            normalized_kind = normalize_knowledge_kind(doc.kind)
-            hint = index_hints.get((space.space_key, normalized_kind, doc.slug), "")
-            score = self._score_candidate(
-                tokens=question_tokens,
-                title=doc.title,
-                slug=doc.slug,
-                body=body,
-                summary=doc.summary or "",
-                hint=hint,
-                source_refs=doc.source_refs or "",
-            )
-            if question_tokens and score == 0:
-                continue
-            ranked.append(
-                (
-                    score,
-                    {
-                        "title": doc.title,
-                        "space_key": space.space_key,
-                        "slug": doc.slug,
-                        "kind": normalized_kind,
-                        "href": knowledge_href(space.space_key, normalized_kind, doc.slug),
-                        "source_url": knowledge_href(space.space_key, normalized_kind, doc.slug),
                         "excerpt": self._excerpt(body, question_tokens),
                     },
                 )

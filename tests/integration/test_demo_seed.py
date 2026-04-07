@@ -20,7 +20,7 @@ def test_demo_seed_populates_pages_assets_and_graph(tmp_path, sample_settings_di
 
     home = client.get("/")
     assert home.status_code == 200
-    assert "Confluence Wiki Demo 홈" in home.text
+    assert "핵심 개념" in home.text
     assert "ARCH" in home.text
 
     page = client.get("/spaces/DEMO/pages/demo-home-9001")
@@ -63,7 +63,7 @@ def test_demo_seed_populates_pages_assets_and_graph(tmp_path, sample_settings_di
     assert "## Entities" in index_text
     assert "## Concepts" in index_text
     assert "## Lint" in index_text
-    assert "Confluence Wiki Demo 홈" in index_text
+    assert "DEMO 핵심 개념" in index_text
 
     graph = client.get("/api/graph")
     assert graph.status_code == 200

@@ -74,6 +74,10 @@ def _knowledge_result_item(doc: KnowledgeDocument, space_key: str) -> dict:
     }
 
 
+def _is_user_visible_knowledge(doc: KnowledgeDocument) -> bool:
+    return normalize_knowledge_kind(doc.kind) in {"concept", "analysis", "lint"}
+
+
 def _load_graph_payload(request: Request, selected_space: str | None = None) -> dict:
     graph_path = _settings(request).wiki_root / "global" / "graph.json"
     if graph_path.exists():
@@ -96,16 +100,15 @@ async def index(request: Request, space: str | None = None) -> HTMLResponse:
     session = _session_factory(request)()
     try:
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
-        query = select(Page, Space).join(Space, Space.id == Page.space_id).order_by(Page.updated_at_remote.desc().nullslast(), Page.title)
-        if space and space != "all":
-            query = query.where(Space.space_key == space)
-        page_rows = session.execute(query).all()
         knowledge_query = select(KnowledgeDocument, Space).join(Space, Space.id == KnowledgeDocument.space_id)
         if space and space != "all":
             knowledge_query = knowledge_query.where(Space.space_key == space)
         knowledge_rows = session.execute(knowledge_query).all()
-        pages = [_page_result_item(page, page_space.space_key) for page, page_space in page_rows]
-        pages.extend(_knowledge_result_item(doc, doc_space.space_key) for doc, doc_space in knowledge_rows)
+        pages = [
+            _knowledge_result_item(doc, doc_space.space_key)
+            for doc, doc_space in knowledge_rows
+            if _is_user_visible_knowledge(doc)
+        ]
         pages.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
         pages = pages[:20]
         return _templates(request).TemplateResponse(
@@ -340,11 +343,6 @@ async def search(request: Request, q: str = Query(default=""), space: str | None
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
         results = []
         if q:
-            query = select(Page, Space).join(Space)
-            if space and space != "all":
-                query = query.where(Space.space_key == space)
-            query = query.where(or_(Page.title.ilike(f"%{q}%"), Page.slug.ilike(f"%{q}%")))
-            page_rows = session.execute(query.limit(50)).all()
             knowledge_query = select(KnowledgeDocument, Space).join(Space)
             if space and space != "all":
                 knowledge_query = knowledge_query.where(Space.space_key == space)
@@ -356,8 +354,11 @@ async def search(request: Request, q: str = Query(default=""), space: str | None
                 )
             )
             knowledge_rows = session.execute(knowledge_query.limit(50)).all()
-            results = [_page_result_item(page, page_space.space_key) for page, page_space in page_rows]
-            results.extend(_knowledge_result_item(doc, doc_space.space_key) for doc, doc_space in knowledge_rows)
+            results = [
+                _knowledge_result_item(doc, doc_space.space_key)
+                for doc, doc_space in knowledge_rows
+                if _is_user_visible_knowledge(doc)
+            ]
             results.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
         return _templates(request).TemplateResponse(
             request,
@@ -415,11 +416,6 @@ async def api_search(request: Request, q: str = Query(default=""), space: str | 
     try:
         if not q:
             return []
-        query = select(Page, Space).join(Space)
-        if space and space != "all":
-            query = query.where(Space.space_key == space)
-        query = query.where(or_(Page.title.ilike(f"%{q}%"), Page.slug.ilike(f"%{q}%")))
-        page_rows = session.execute(query.limit(50)).all()
         knowledge_query = select(KnowledgeDocument, Space).join(Space)
         if space and space != "all":
             knowledge_query = knowledge_query.where(Space.space_key == space)
@@ -432,13 +428,10 @@ async def api_search(request: Request, q: str = Query(default=""), space: str | 
         )
         knowledge_rows = session.execute(knowledge_query.limit(50)).all()
         results = [
-            {"title": page.title, "space_key": page_space.space_key, "slug": page.slug, "href": f"/spaces/{page_space.space_key}/pages/{page.slug}"}
-            for page, page_space in page_rows
-        ]
-        results.extend(
             {"title": doc.title, "space_key": doc_space.space_key, "slug": doc.slug, "href": knowledge_href(doc_space.space_key, doc.kind, doc.slug)}
             for doc, doc_space in knowledge_rows
-        )
+            if _is_user_visible_knowledge(doc)
+        ]
         return results
     finally:
         session.close()
