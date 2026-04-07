@@ -109,6 +109,25 @@ GENERIC_CONTEXT_STOPWORDS = {
     "false",
     "true",
 }
+GENERIC_COMMUNICATION_STOPWORDS = {
+    "후속",
+    "논의",
+    "상황",
+    "사본",
+    "바로",
+    "관련된",
+    "메신저",
+    "부탁",
+    "드립니다",
+    "전달",
+    "요청",
+    "회신",
+    "참고",
+    "협의",
+    "검토",
+    "공유",
+    "추가",
+}
 LOW_SIGNAL_SUFFIXES = (
     "합니다",
     "됩니다",
@@ -213,6 +232,7 @@ STOPWORDS = {
     "th",
     *TITLE_BLACKLIST,
     *GENERIC_CONTEXT_STOPWORDS,
+    *GENERIC_COMMUNICATION_STOPWORDS,
 }
 SOURCE_WEIGHTS = {
     "title": 9,
@@ -825,9 +845,19 @@ class KnowledgeService:
     def _is_candidate_usable(candidate: PhraseCandidate) -> bool:
         if candidate.token_count > 1:
             return True
-        if candidate.occurrences >= 2:
+
+        key = candidate.key.lower()
+        if key in {item.lower() for item in GENERIC_COMMUNICATION_STOPWORDS}:
+            return False
+        if key in TOPIC_HEADWORDS:
             return True
-        return candidate.sources != {"body"}
+        if candidate.display.isascii() and candidate.display.upper() == candidate.display and len(candidate.display) <= 6:
+            return True
+        if "title" in candidate.sources or "table" in candidate.sources or "link" in candidate.sources or "existing" in candidate.sources:
+            return True
+        if candidate.occurrences >= 3 and candidate.sources != {"body"}:
+            return True
+        return False
 
     @classmethod
     def _minimum_keyword_count(cls, doc_length: int) -> int:

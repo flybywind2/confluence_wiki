@@ -10,7 +10,6 @@ from app.core.config import Settings, get_settings
 
 WEAK_TOPIC_COMPONENTS = {
     "analysis",
-    "assistant",
     "check",
     "guide",
     "policy",
