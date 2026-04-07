@@ -7,7 +7,10 @@
     <meta name="description" content="{{ meta_description or 'Confluence mirror에서 동기화한 markdown wiki를 읽기 중심 UI로 제공합니다.' }}" />
     <link rel="stylesheet" href="/static/app.css" />
   </head>
-  <body data-selected-space="{{ selected_space or 'all' }}">
+  <body
+    data-selected-space="{{ selected_space or 'all' }}"
+    data-selected-space-name="{{ selected_space_name or '전체 위키' }}"
+  >
     <div class="page-shell">
       <aside class="sidebar">
         <a class="brand" href="/">Confluence Wiki</a>
@@ -30,9 +33,9 @@
           {% endif %}
           <div class="search-actions">
             <button type="submit">검색</button>
-            <button type="submit" formaction="/knowledge/generate" formmethod="post">위키 작성</button>
           </div>
         </form>
+        <button type="button" class="sidebar-secondary-button" id="query-generator-open">위키 작성</button>
       </aside>
       <main class="content">
         {% block content %}{% endblock %}
@@ -98,5 +101,52 @@
       </form>
     </section>
     <script src="/static/wiki-assistant.js"></script>
+    <div class="query-generator-backdrop" id="query-generator-backdrop" hidden></div>
+    <section
+      class="query-generator-modal"
+      id="query-generator-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="query-generator-title"
+      hidden
+    >
+      <header class="query-generator-header">
+        <div>
+          <div class="eyebrow">Query Wiki</div>
+          <h2 id="query-generator-title">검색 위키 작성</h2>
+          <p class="query-generator-scope" id="query-generator-scope"></p>
+        </div>
+        <button type="button" class="assistant-close" id="query-generator-close" aria-label="닫기">×</button>
+      </header>
+      <form class="query-generator-form" id="query-generator-form">
+        <label class="query-generator-label" for="query-generator-input">키워드 또는 주제</label>
+        <input
+          id="query-generator-input"
+          name="query"
+          type="text"
+          autocomplete="off"
+          placeholder="예: Codex, LLM Wiki, Ghidra MCP"
+        />
+        <p class="query-generator-hint">
+          검색과 별도로 raw 문서를 다시 훑어 주제 위키를 생성합니다.
+        </p>
+        <div class="query-generator-progress" id="query-generator-progress" hidden>
+          <div class="query-generator-progress-bar" aria-hidden="true">
+            <span id="query-generator-progress-fill"></span>
+          </div>
+          <div class="query-generator-progress-meta">
+            <strong id="query-generator-progress-label">0%</strong>
+            <span id="query-generator-status">대기 중입니다.</span>
+          </div>
+          <ul class="query-generator-events" id="query-generator-events"></ul>
+          <a class="source-link query-generator-result" id="query-generator-result" href="#" hidden>생성된 위키 보기</a>
+        </div>
+        <div class="query-generator-actions">
+          <span class="query-generator-inline-status" id="query-generator-inline-status"></span>
+          <button type="submit" class="assistant-submit" id="query-generator-submit">생성 시작</button>
+        </div>
+      </form>
+    </section>
+    <script src="/static/query-generator.js"></script>
   </body>
 </html>

@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from app.api.routes import router
 from app.core.config import Settings, get_settings
 from app.db.session import create_session_factory
+from app.services.query_jobs import QueryJobManager
 
 
 def _fallback_settings() -> Settings:
@@ -56,6 +57,7 @@ def create_app(settings: Settings | None = None, allow_test_fallback: bool | Non
     app.state.settings = settings
     app.state.session_factory = create_session_factory(settings.database_url)
     app.state.templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+    app.state.query_jobs = QueryJobManager(settings)
 
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
     app.mount("/wiki-static", StaticFiles(directory=str(settings.wiki_root)), name="wiki-static")

@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 import re
+from typing import Callable
 import uuid
 
 from bs4 import BeautifulSoup
@@ -621,10 +622,22 @@ class KnowledgeService:
             "href": knowledge_href(doc.kind, doc.slug),
         }
 
-    def save_query_wiki(self, query: str, selected_space: str | None = None, max_documents: int = 8) -> dict[str, str]:
+    def save_query_wiki(
+        self,
+        query: str,
+        selected_space: str | None = None,
+        max_documents: int = 8,
+        progress_callback: Callable[[int, str], None] | None = None,
+    ) -> dict[str, str]:
         session = self.session_factory()
         try:
-            result = self.save_query_wiki_with_session(session, query=query, selected_space=selected_space, max_documents=max_documents)
+            result = self.save_query_wiki_with_session(
+                session,
+                query=query,
+                selected_space=selected_space,
+                max_documents=max_documents,
+                progress_callback=progress_callback,
+            )
             session.commit()
             return result
         except Exception:
@@ -639,10 +652,16 @@ class KnowledgeService:
         query: str,
         selected_space: str | None = None,
         max_documents: int = 8,
+        progress_callback: Callable[[int, str], None] | None = None,
     ) -> dict[str, str]:
+        def notify(progress: int, message: str) -> None:
+            if progress_callback is not None:
+                progress_callback(progress, message)
+
         normalized_query = self._normalize_query_topic(query)
         if not normalized_query:
             raise ValueError("query is required")
+        notify(8, "검색 질의를 정리하는 중입니다.")
         global_space = ensure_global_knowledge_space(session)
         page_rows = session.execute(
             select(Page, WikiDocument, Space)
@@ -650,9 +669,11 @@ class KnowledgeService:
             .join(Space, Space.id == Page.space_id)
             .where(Space.space_key != GLOBAL_KNOWLEDGE_SPACE_KEY)
         ).all()
+        total_rows = len(page_rows)
+        notify(15, f"raw 문서 {total_rows}건을 확인하는 중입니다.")
         ranked: list[tuple[int, dict[str, str]]] = []
         query_tokens = [token.lower() for token in TOKEN_RE.findall(normalized_query)]
-        for page, wiki_document, space in page_rows:
+        for index, (page, wiki_document, space) in enumerate(page_rows, start=1):
             if selected_space and selected_space not in {"", "all"} and space.space_key != selected_space:
                 continue
             markdown_path = self.settings.wiki_root / wiki_document.markdown_path
@@ -679,10 +700,14 @@ class KnowledgeService:
                     },
                 )
             )
+            if total_rows and (index == total_rows or index == 1 or index % 5 == 0):
+                scan_progress = 15 + int((index / max(total_rows, 1)) * 45)
+                notify(scan_progress, f"raw 문서 {index}/{total_rows}건을 분석하는 중입니다.")
         if not ranked:
             raise ValueError("no raw pages matched the query")
         ranked.sort(key=lambda item: (-item[0], item[1]["title"].lower()))
         items = [payload for _score, payload in ranked[:max_documents]]
+        notify(68, f"관련 raw 문서 {len(items)}건을 주제 문서로 정리하는 중입니다.")
         related_keywords = self._related_topics_from_items(session, items, exclude_title=normalized_query)
         body = self.text_client.synthesize_topic_page(
             ", ".join(sorted({item["space_key"] for item in items})),
@@ -691,6 +716,7 @@ class KnowledgeService:
             related_keywords,
             prefer_llm=False,
         )
+        notify(85, "위키 문서를 저장하는 중입니다.")
         doc = self._upsert_document(
             session=session,
             space=global_space,
@@ -701,6 +727,7 @@ class KnowledgeService:
             body=self._ensure_keyword_sections(normalized_query, items, related_keywords, body),
             source_refs="\n".join(self._page_reference(item) for item in items),
         )
+        notify(92, "인덱스와 연결 정보를 갱신하는 중입니다.")
         self._rebuild_indexes_for_space(session, global_space)
         append_space_log(
             self.settings.wiki_root,
@@ -710,6 +737,7 @@ class KnowledgeService:
             [{"title": doc.title, "slug": doc.slug, "kind": doc.kind, "href": knowledge_href(doc.kind, doc.slug)}],
             window_label=f"query: {normalized_query}",
         )
+        notify(100, "위키 생성이 완료되었습니다.")
         return {
             "kind": doc.kind,
             "slug": doc.slug,

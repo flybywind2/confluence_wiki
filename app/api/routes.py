@@ -44,6 +44,10 @@ def _settings(request: Request):
     return request.app.state.settings
 
 
+def _query_jobs(request: Request):
+    return request.app.state.query_jobs
+
+
 def _load_page_row(session, space_key: str, slug: str):
     statement = (
         select(Page, WikiDocument)
@@ -882,12 +886,16 @@ async def api_ask_save(request: Request, payload: dict) -> dict:
 @router.post("/knowledge/generate")
 async def generate_query_wiki(
     request: Request,
-    q: str = Form(...),
+    q: str | None = Form(default=None),
+    query: str | None = Form(default=None),
     space: str = Form(default=""),
 ) -> RedirectResponse:
+    submitted_query = str(q or query or request.query_params.get("q") or request.query_params.get("query") or "").strip()
+    if not submitted_query:
+        return RedirectResponse(url=request.headers.get("referer") or "/", status_code=303)
     try:
         result = KnowledgeService(_settings(request)).save_query_wiki(
-            query=q,
+            query=submitted_query,
             selected_space=None,
         )
     except ValueError as exc:
@@ -904,6 +912,25 @@ async def api_generate_query_wiki(request: Request, payload: dict) -> dict:
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api/query-jobs")
+async def api_start_query_job(request: Request, payload: dict) -> JSONResponse:
+    query = str(payload.get("query") or payload.get("q") or "").strip()
+    selected_space = str(payload.get("selected_space") or payload.get("space") or "").strip() or None
+    try:
+        snapshot = _query_jobs(request).start_job(query=query, selected_space=selected_space)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(snapshot, status_code=202)
+
+
+@router.get("/api/query-jobs/{job_id}")
+async def api_query_job_status(request: Request, job_id: str) -> dict:
+    snapshot = _query_jobs(request).get_job(job_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="query job not found")
+    return snapshot
 
 
 @router.post("/admin/bootstrap")
