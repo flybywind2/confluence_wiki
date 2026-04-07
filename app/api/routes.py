@@ -47,15 +47,24 @@ def _meta_description(text: str, fallback: str = "Confluence mirror에서 동기
     return (compact or fallback)[:180]
 
 
+def _space_display_name(space: Space) -> str:
+    return space.name or space.space_key
+
+
+def _space_name_by_key(spaces: list[Space]) -> dict[str, str]:
+    return {space.space_key: _space_display_name(space) for space in spaces}
+
+
 def _history_snapshot_path(request: Request, space_key: str, slug: str, version_number: int) -> Path:
     return _settings(request).wiki_root / "spaces" / space_key / "history" / slug / f"v{version_number:04d}.md"
 
 
-def _page_result_item(page: Page, space_key: str) -> dict:
+def _page_result_item(page: Page, space_key: str, space_name: str) -> dict:
     return {
         "title": page.title,
         "slug": page.slug,
         "space_key": space_key,
+        "space_name": space_name,
         "href": f"/spaces/{space_key}/pages/{page.slug}",
         "updated_at_label": str(page.updated_at_remote) if page.updated_at_remote else "",
         "kind_label": "원문",
@@ -63,11 +72,12 @@ def _page_result_item(page: Page, space_key: str) -> dict:
     }
 
 
-def _knowledge_result_item(doc: KnowledgeDocument, space_key: str) -> dict:
+def _knowledge_result_item(doc: KnowledgeDocument, space_key: str, space_name: str) -> dict:
     return {
         "title": doc.title,
         "slug": doc.slug,
         "space_key": space_key,
+        "space_name": space_name,
         "href": knowledge_href(space_key, doc.kind, doc.slug),
         "updated_at_label": str(doc.updated_at),
         "kind_label": knowledge_label(doc.kind),
@@ -163,13 +173,14 @@ async def index(
     session = _session_factory(request)()
     try:
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        space_name_by_key = _space_name_by_key(spaces)
         knowledge_query = select(KnowledgeDocument, Space).join(Space, Space.id == KnowledgeDocument.space_id)
         if space and space != "all":
             knowledge_query = knowledge_query.where(Space.space_key == space)
         knowledge_rows = session.execute(knowledge_query).all()
         recent_days = _parse_recent_days(recent)
         pages = [
-            _knowledge_result_item(doc, doc_space.space_key)
+            _knowledge_result_item(doc, doc_space.space_key, _space_display_name(doc_space))
             for doc, doc_space in knowledge_rows
             if _is_user_visible_knowledge(doc) and _matches_filters(doc, kind, recent_days)
         ]
@@ -181,7 +192,9 @@ async def index(
             {
                 "request": request,
                 "spaces": spaces,
+                "space_name_by_key": space_name_by_key,
                 "selected_space": space or "all",
+                "selected_space_name": space_name_by_key.get(space or "", space or "전체 Space") if space and space != "all" else "전체 Space",
                 "pages": pages,
                 "selected_kind": normalize_knowledge_kind(kind) if kind and kind != "all" else "all",
                 "selected_recent": recent or "all",
@@ -221,6 +234,7 @@ async def knowledge_view(request: Request, space_key: str, kind: str, slug: str)
         markdown_path = _settings(request).wiki_root / doc.markdown_path
         body_html = render_markdown(read_markdown_body(markdown_path))
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        space_name_by_key = _space_name_by_key(spaces)
         page_obj = SimpleNamespace(
             title=doc.title,
             prod_url=None,
@@ -234,9 +248,12 @@ async def knowledge_view(request: Request, space_key: str, kind: str, slug: str)
             {
                 "request": request,
                 "spaces": spaces,
+                "space_name_by_key": space_name_by_key,
                 "selected_space": space_key,
+                "selected_space_name": space_name_by_key.get(space_key, space_key),
                 "page": page_obj,
                 "page_space_key": space_key,
+                "page_space_name": space_name_by_key.get(space_key, space_key),
                 "body_html": body_html,
                 "page_kind": "knowledge",
                 "page_badge": knowledge_label(normalized_kind),
@@ -260,15 +277,19 @@ async def synthesis_view(request: Request, space_key: str) -> HTMLResponse:
             raise HTTPException(status_code=404, detail="Synthesis not found")
         body_html = render_markdown(read_markdown_body(synthesis_path))
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        space_name_by_key = _space_name_by_key(spaces)
         return _templates(request).TemplateResponse(
             request,
             "page.html",
             {
                 "request": request,
                 "spaces": spaces,
+                "space_name_by_key": space_name_by_key,
                 "selected_space": space_key,
+                "selected_space_name": space_name_by_key.get(space_key, space_key),
                 "page": {"title": f"{space_key} Synthesis", "prod_url": None},
                 "page_space_key": space_key,
+                "page_space_name": space_name_by_key.get(space_key, space_key),
                 "body_html": body_html,
                 "page_kind": "synthesis",
                 "meta_description": _meta_description(f"{space_key} synthesis"),
@@ -294,15 +315,19 @@ async def page_history(request: Request, space_key: str, slug: str) -> HTMLRespo
             select(PageVersion).where(PageVersion.page_id == page.id).order_by(PageVersion.version_number.desc())
         ).all()
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        space_name_by_key = _space_name_by_key(spaces)
         return _templates(request).TemplateResponse(
             request,
             "page_history.html",
             {
                 "request": request,
                 "spaces": spaces,
+                "space_name_by_key": space_name_by_key,
                 "selected_space": space_key,
+                "selected_space_name": space_name_by_key.get(space_key, space_key),
                 "page": page,
                 "page_space_key": space_key,
+                "page_space_name": space_name_by_key.get(space_key, space_key),
                 "versions": versions,
                 "meta_description": _meta_description(wiki_document.summary or page.title),
             },
@@ -350,15 +375,19 @@ async def page_history_version(request: Request, space_key: str, slug: str, vers
         if markdown_path is not None and markdown_path.exists():
             body_html = render_markdown(read_markdown_body(markdown_path))
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        space_name_by_key = _space_name_by_key(spaces)
         return _templates(request).TemplateResponse(
             request,
             "page.html",
             {
                 "request": request,
                 "spaces": spaces,
+                "space_name_by_key": space_name_by_key,
                 "selected_space": space_key,
+                "selected_space_name": space_name_by_key.get(space_key, space_key),
                 "page": page,
                 "page_space_key": space_key,
+                "page_space_name": space_name_by_key.get(space_key, space_key),
                 "body_html": body_html,
                 "page_kind": "history_snapshot",
                 "history_versions": [],
@@ -383,6 +412,7 @@ async def page_view(request: Request, space_key: str, slug: str) -> HTMLResponse
         markdown_path = _settings(request).wiki_root / wiki_document.markdown_path
         body_html = render_markdown(read_markdown_body(markdown_path))
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        space_name_by_key = _space_name_by_key(spaces)
         versions = session.scalars(
             select(PageVersion).where(PageVersion.page_id == page.id).order_by(PageVersion.version_number.desc())
         ).all()
@@ -392,9 +422,12 @@ async def page_view(request: Request, space_key: str, slug: str) -> HTMLResponse
             {
                 "request": request,
                 "spaces": spaces,
+                "space_name_by_key": space_name_by_key,
                 "selected_space": space_key,
+                "selected_space_name": space_name_by_key.get(space_key, space_key),
                 "page": page,
                 "page_space_key": space_key,
+                "page_space_name": space_name_by_key.get(space_key, space_key),
                 "body_html": body_html,
                 "page_kind": "page",
                 "history_versions": versions,
@@ -419,6 +452,7 @@ async def search(
     session = _session_factory(request)()
     try:
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        space_name_by_key = _space_name_by_key(spaces)
         results = []
         if q:
             knowledge_query = select(KnowledgeDocument, Space).join(Space)
@@ -434,7 +468,7 @@ async def search(
             knowledge_rows = session.execute(knowledge_query.limit(50)).all()
             recent_days = _parse_recent_days(recent)
             results = [
-                _knowledge_result_item(doc, doc_space.space_key)
+                _knowledge_result_item(doc, doc_space.space_key, _space_display_name(doc_space))
                 for doc, doc_space in knowledge_rows
                 if _is_user_visible_knowledge(doc) and _matches_filters(doc, kind, recent_days)
             ]
@@ -445,7 +479,9 @@ async def search(
             {
                 "request": request,
                 "spaces": spaces,
+                "space_name_by_key": space_name_by_key,
                 "selected_space": space or "all",
+                "selected_space_name": space_name_by_key.get(space or "", space or "전체 위키") if space and space != "all" else "전체 위키",
                 "pages": results,
                 "search_query": q,
                 "selected_kind": normalize_knowledge_kind(kind) if kind and kind != "all" else "all",
@@ -466,13 +502,16 @@ async def graph_page(request: Request, space: str | None = None, view: str = Que
     session = _session_factory(request)()
     try:
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        space_name_by_key = _space_name_by_key(spaces)
         return _templates(request).TemplateResponse(
             request,
             "graph.html",
             {
                 "request": request,
                 "spaces": spaces,
+                "space_name_by_key": space_name_by_key,
                 "selected_space": space or "all",
+                "selected_space_name": space_name_by_key.get(space or "", space or "전체 그래프") if space and space != "all" else "전체 그래프",
                 "selected_view": view if view in {"knowledge", "raw"} else "knowledge",
                 "meta_description": _meta_description(
                     f"{(space or '전체')} 범위 문서 연결 그래프를 표시합니다."

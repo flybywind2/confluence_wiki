@@ -5,14 +5,14 @@
   <nav class="page-breadcrumbs" aria-label="breadcrumb">
     <a href="/">전체</a>
     <span>/</span>
-    <a href="/spaces/{{ page_space_key }}">{{ page_space_key }}</a>
+    <a href="/spaces/{{ page_space_key }}">{{ page_space_name or page_space_key }}</a>
     <span>/</span>
     <a href="/spaces/{{ page_space_key }}/pages/{{ page.slug }}">{{ page.title }}</a>
     <span>/</span>
     <span>문서 이력</span>
   </nav>
   <header class="page-header">
-    <span class="eyebrow">{{ page_space_key }}</span>
+    <span class="eyebrow">{{ page_space_name or page_space_key }}</span>
     <h1>{{ page.title }} 문서 이력</h1>
     <div class="page-submeta">
       <span>현재 버전 · {{ page.current_version }}</span>

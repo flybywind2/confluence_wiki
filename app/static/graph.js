@@ -10,10 +10,13 @@
   const query = params.toString() ? `?${params.toString()}` : "";
   const response = await fetch(`/api/graph${query}`);
   const payload = await response.json();
+  const resetButton = document.getElementById("graph-reset");
 
   const width = container.clientWidth || 900;
   const height = container.clientHeight || 640;
   const svg = d3.select(container).append("svg").attr("viewBox", `0 0 ${width} ${height}`);
+  const initialPositions = new Map();
+  let initialLayoutCaptured = false;
 
   const simulation = d3.forceSimulation(payload.nodes)
     .force("link", d3.forceLink(payload.edges).id(d => d.id).distance(d => {
@@ -81,7 +84,7 @@
     .attr("dy", 4)
     .attr("fill", "#334155");
 
-  simulation.on("tick", () => {
+  const render = () => {
     link
       .attr("x1", d => d.source.x)
       .attr("y1", d => d.source.y)
@@ -89,5 +92,31 @@
       .attr("y2", d => d.target.y);
 
     node.attr("transform", d => `translate(${d.x},${d.y})`);
+  };
+
+  simulation.on("tick", render);
+  simulation.on("end", () => {
+    if (initialLayoutCaptured) return;
+    payload.nodes.forEach((item) => {
+      initialPositions.set(item.id, { x: item.x, y: item.y });
+    });
+    initialLayoutCaptured = true;
+    if (resetButton) resetButton.disabled = false;
   });
+
+  if (resetButton) {
+    resetButton.addEventListener("click", () => {
+      if (!initialLayoutCaptured) return;
+      simulation.stop();
+      payload.nodes.forEach((item) => {
+        const saved = initialPositions.get(item.id);
+        if (!saved) return;
+        item.x = saved.x;
+        item.y = saved.y;
+        item.fx = null;
+        item.fy = null;
+      });
+      render();
+    });
+  }
 })();

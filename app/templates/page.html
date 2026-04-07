@@ -5,7 +5,7 @@
   <nav class="page-breadcrumbs" aria-label="breadcrumb">
     <a href="/">전체</a>
     <span>/</span>
-    <a href="/spaces/{{ page_space_key }}">{{ page_space_key }}</a>
+    <a href="/spaces/{{ page_space_key }}">{{ page_space_name or page_space_key }}</a>
     <span>/</span>
     <span>{{ page.title }}</span>
   </nav>
@@ -18,7 +18,7 @@
   </div>
   {% endif %}
   <header class="page-header">
-    <span class="eyebrow">{{ page_space_key }}</span>
+    <span class="eyebrow">{{ page_space_name or page_space_key }}</span>
     <h1>{{ page.title }}</h1>
     <div class="page-submeta">
       {% if page_badge %}

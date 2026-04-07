@@ -5,6 +5,7 @@
   <div>
     <span class="eyebrow">Obsidian-Style Graph</span>
     <h1>문서 연결 그래프</h1>
+    <p class="graph-scope">{{ selected_space_name }}</p>
     <p>{% if selected_view == 'knowledge' %}주제 문서, 분석 문서, synthesis와 원문 근거의 연결을 시각화합니다.{% else %}부모-자식 관계와 문서 내 링크를 동시에 시각화합니다.{% endif %}</p>
   </div>
   <div class="legend">
@@ -34,6 +35,9 @@
   </form>
 </section>
 <section class="graph-card">
+  <div class="graph-toolbar">
+    <button type="button" class="graph-reset" id="graph-reset" disabled>위치 리셋</button>
+  </div>
   <div id="graph-canvas" data-space="{{ selected_space }}" data-view="{{ selected_view }}"></div>
 </section>
 <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>

@@ -61,6 +61,24 @@ def test_space_home_can_filter_by_kind_and_recent_group(tmp_path, sample_setting
     assert "DEMO Lint Report" not in response.text
 
 
+def test_ui_uses_space_names_instead_of_keys(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+
+    home = client.get("/")
+    assert home.status_code == 200
+    assert "Demo Showcase" in home.text
+    assert "Architecture Notes" in home.text
+
+    page = client.get("/spaces/DEMO/pages/demo-home-9001")
+    assert page.status_code == 200
+    assert "Demo Showcase" in page.text
+
+
 def test_search_page_shows_empty_state_for_no_results(tmp_path, sample_settings_dict):
     sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
     sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
@@ -147,6 +165,20 @@ def test_synthesis_route_renders_space_summary(tmp_path, sample_settings_dict):
     assert response.status_code == 200
     assert "DEMO Synthesis" in response.text
     assert "핵심 문서" in response.text
+
+
+def test_graph_page_renders_reset_button_and_space_name(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    response = client.get("/graph?space=DEMO&view=knowledge")
+
+    assert response.status_code == 200
+    assert "위치 리셋" in response.text
+    assert "Demo Showcase" in response.text
 
 
 def test_knowledge_route_renders_entity_page(tmp_path, sample_settings_dict):

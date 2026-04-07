@@ -180,6 +180,30 @@ body {
 }
 .wiki-body img { max-width: 100%; border-radius: 14px; border: 1px solid var(--line); }
 .graph-card { min-height: 680px; }
+.graph-scope {
+  margin: 0 0 10px;
+  color: var(--accent);
+  font-weight: 800;
+}
+.graph-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+.graph-reset {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 14px;
+  background: #fffdf8;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.graph-reset:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
 #graph-canvas { width: 100%; height: 640px; }
 .legend { display: flex; gap: 18px; align-items: center; }
 .legend-line { display: inline-block; width: 28px; height: 3px; margin-right: 6px; vertical-align: middle; }

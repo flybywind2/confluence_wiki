@@ -20,7 +20,7 @@
           <div class="sidebar-title">Space</div>
           <a class="{% if selected_space == 'all' %}active{% endif %}" href="/">전체</a>
           {% for space in spaces %}
-          <a class="{% if selected_space == space.space_key %}active{% endif %}" href="/spaces/{{ space.space_key }}">{{ space.space_key }}</a>
+          <a class="{% if selected_space == space.space_key %}active{% endif %}" href="/spaces/{{ space.space_key }}">{{ space.name or space.space_key }}</a>
           {% endfor %}
         </div>
         <form class="search-box" action="/search" method="get">
