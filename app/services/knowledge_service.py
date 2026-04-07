@@ -118,6 +118,51 @@ LOW_SIGNAL_SUFFIXES = (
     "되었는지",
     "되었는가",
 )
+TOPIC_HEADWORDS = {
+    "agent",
+    "analysis",
+    "architecture",
+    "assistant",
+    "dashboard",
+    "flow",
+    "guide",
+    "issue",
+    "memo",
+    "overview",
+    "plan",
+    "policy",
+    "portal",
+    "report",
+    "runbook",
+    "status",
+    "구조",
+    "계획",
+    "개요",
+    "검증",
+    "대시보드",
+    "대응",
+    "런북",
+    "메모",
+    "분석",
+    "상태",
+    "아키텍처",
+    "어시스턴트",
+    "에이전트",
+    "연동",
+    "운영",
+    "이슈",
+    "일정",
+    "절차",
+    "정책",
+    "점검",
+    "지표",
+    "지원",
+    "체계",
+    "체크리스트",
+    "포털",
+    "현황",
+    "흐름",
+}
 KOREAN_PARTICLE_SUFFIXES = (
     "으로",
     "와의",
@@ -934,7 +979,10 @@ class KnowledgeService:
         if len(tokens) < 2:
             return False
         unique_keys = {token.key for token in tokens}
-        return len(unique_keys) == len(tokens)
+        if len(unique_keys) != len(tokens):
+            return False
+        headword = tokens[-1].key
+        return headword in TOPIC_HEADWORDS
 
     @classmethod
     def _display_topic_token(cls, token: str) -> str:

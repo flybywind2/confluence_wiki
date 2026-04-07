@@ -575,6 +575,40 @@ def test_existing_phrase_topic_absorbs_related_document_even_with_weak_title(tmp
     assert "ds.md" not in {path.name for path in keyword_root.glob("*.md")}
 
 
+def test_sentence_fragments_do_not_become_topic_pages(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100"],
+            title_overrides={"100": "주간 회의록"},
+            body_overrides={
+                "100": (
+                    "<h1>후속 기다리지 않고 메신저 상황 부탁 드립니다</h1>"
+                    "<h2>AI Portal 운영 점검</h2>"
+                    "<p>AI Portal 장애 대응과 AI Portal 운영 현황을 공유합니다.</p>"
+                )
+            },
+        ),
+    )
+
+    service.run_incremental(space_key="DEMO")
+
+    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_files = {path.name for path in keyword_root.glob("*.md")}
+
+    assert "ai-portal.md" in keyword_files
+    assert "후속-기다리지.md" not in keyword_files
+    assert "않고-메신저.md" not in keyword_files
+    assert "상황-부탁.md" not in keyword_files
+    assert "부탁-드립니다.md" not in keyword_files
+
+
 def test_page_slug_stays_stable_when_title_changes(tmp_path, sample_settings_dict):
     from app.core.config import Settings
 
