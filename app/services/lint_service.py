@@ -44,7 +44,7 @@ class LintService:
         orphan_knowledge = [doc for doc in knowledge_docs if doc.kind != "lint" and not doc.source_refs]
         synthesis_path = self.settings.wiki_root / "spaces" / space_key / "synthesis.md"
 
-        lines = [f"# {space_key} Lint Report", "", "이 문서는 위키 상태를 점검한 결과입니다.", "", "## Missing Summaries", ""]
+        lines = ["# Lint Report", "", "이 문서는 위키 상태를 점검한 결과입니다.", "", "## Missing Summaries", ""]
         lines.extend([f"- {page.title}" for page in missing_summaries] or ["- 없음"])
         lines.extend(["", "## Orphans", ""])
         lines.extend([f"- page: {page.title}" for page in orphan_pages] or ["- 없음"])
@@ -59,7 +59,7 @@ class LintService:
             space=space,
             kind="lint",
             slug="report",
-            title=f"{space_key} Lint Report",
+            title="Lint Report",
             summary=f"{space_key} 위키 점검 보고서",
             body="\n".join(lines),
             source_refs="",

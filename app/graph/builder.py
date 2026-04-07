@@ -18,7 +18,7 @@ PATH_RE = re.compile(r"(?P<href>/spaces/[^\s)]+)")
 
 def _kind_color(kind: str, space_key: str) -> str:
     return {
-        "concept": "#0f766e",
+        "keyword": "#0f766e",
         "analysis": "#9a3412",
         "synthesis": "#1d4ed8",
         "page": _space_color(space_key),
@@ -85,8 +85,8 @@ def build_knowledge_graph_payload(
     page_lookup = {(item["space_key"], item["slug"]): item for item in page_documents}
     nodes: dict[str, dict] = {}
     edges: dict[tuple[str, str, str], dict[str, str]] = {}
-    concept_nodes_by_space: dict[str, list[str]] = {}
-    concept_page_refs: dict[str, set[tuple[str, str]]] = {}
+    keyword_nodes_by_space: dict[str, list[str]] = {}
+    keyword_page_refs: dict[str, set[tuple[str, str]]] = {}
 
     def register_node(node: dict) -> None:
         if selected_space and node.get("space_key") != selected_space:
@@ -101,6 +101,8 @@ def build_knowledge_graph_payload(
     for doc in knowledge_documents:
         space_key = doc["space_key"]
         kind = normalize_knowledge_kind(doc["kind"])
+        if kind not in {"keyword", "analysis"}:
+            continue
         node_id = f"knowledge:{space_key}:{kind}:{doc['slug']}"
         register_node(
             {
@@ -113,18 +115,20 @@ def build_knowledge_graph_payload(
                 "color": _kind_color(kind, space_key),
             }
         )
-        if kind == "concept":
-            concept_nodes_by_space.setdefault(space_key, []).append(node_id)
-            concept_page_refs[node_id] = set()
+        if kind == "keyword":
+            keyword_nodes_by_space.setdefault(space_key, []).append(node_id)
+            keyword_page_refs[node_id] = set()
 
     for doc in knowledge_documents:
         space_key = doc["space_key"]
         kind = normalize_knowledge_kind(doc["kind"])
+        if kind not in {"keyword", "analysis"}:
+            continue
         node_id = f"knowledge:{space_key}:{kind}:{doc['slug']}"
         if node_id not in nodes:
             continue
         refs = _extract_refs(doc.get("source_refs") or "")
-        if kind == "concept":
+        if kind == "keyword":
             for ref in refs:
                 if ref["kind"] != "page":
                     continue
@@ -144,30 +148,30 @@ def build_knowledge_graph_payload(
                         "color": _kind_color("page", page["space_key"]),
                     }
                 )
-                concept_page_refs.setdefault(node_id, set()).add(page_key)
-                register_edge(node_id, page_node_id, "concept-source")
+                keyword_page_refs.setdefault(node_id, set()).add(page_key)
+                register_edge(node_id, page_node_id, "keyword-source")
         if kind == "analysis":
-            referenced_concepts = {
+            referenced_keywords = {
                 f"knowledge:{ref['space_key']}:{normalize_knowledge_kind(ref['kind'])}:{ref['slug']}"
                 for ref in refs
-                if normalize_knowledge_kind(ref["kind"]) == "concept"
+                if normalize_knowledge_kind(ref["kind"]) == "keyword"
             }
-            if not referenced_concepts:
-                referenced_concepts = {
-                    concept_id
-                    for concept_id in concept_nodes_by_space.get(space_key, [])
-                    if doc["slug"] != concept_id.rsplit(":", 1)[-1]
+            if not referenced_keywords:
+                referenced_keywords = {
+                    keyword_id
+                    for keyword_id in keyword_nodes_by_space.get(space_key, [])
+                    if doc["slug"] != keyword_id.rsplit(":", 1)[-1]
                 }
-            for concept_id in sorted(referenced_concepts):
-                if concept_id in nodes:
-                    register_edge(node_id, concept_id, "analysis-concept")
+            for keyword_id in sorted(referenced_keywords):
+                if keyword_id in nodes:
+                    register_edge(node_id, keyword_id, "analysis-keyword")
 
-    for space_key, concept_ids in concept_nodes_by_space.items():
+    for space_key, keyword_ids in keyword_nodes_by_space.items():
         synthesis_id = f"synthesis:{space_key}"
         register_node(
             {
                 "id": synthesis_id,
-                "title": f"{space_key} Synthesis",
+                "title": "Synthesis",
                 "space_key": space_key,
                 "slug": "synthesis",
                 "kind": "synthesis",
@@ -175,15 +179,12 @@ def build_knowledge_graph_payload(
                 "color": _kind_color("synthesis", space_key),
             }
         )
-        core_topic_id = next((concept_id for concept_id in concept_ids if concept_id.endswith(":core-topics")), None)
-        for concept_id in sorted(concept_ids):
-            register_edge(synthesis_id, concept_id, "synthesis-concept")
-            if core_topic_id and concept_id != core_topic_id:
-                register_edge(core_topic_id, concept_id, "concept-related")
-        for idx, left in enumerate(concept_ids):
-            left_refs = concept_page_refs.get(left, set())
-            for right in concept_ids[idx + 1 :]:
-                if left_refs and left_refs.intersection(concept_page_refs.get(right, set())):
-                    register_edge(left, right, "concept-related")
+        for keyword_id in sorted(keyword_ids):
+            register_edge(synthesis_id, keyword_id, "synthesis-keyword")
+        for idx, left in enumerate(keyword_ids):
+            left_refs = keyword_page_refs.get(left, set())
+            for right in keyword_ids[idx + 1 :]:
+                if left_refs and left_refs.intersection(keyword_page_refs.get(right, set())):
+                    register_edge(left, right, "keyword-related")
 
     return {"nodes": list(nodes.values()), "edges": list(edges.values())}

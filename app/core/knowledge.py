@@ -2,7 +2,7 @@ from __future__ import annotations
 
 KNOWLEDGE_KIND_SEGMENTS = {
     "entity": "entities",
-    "concept": "concepts",
+    "keyword": "keywords",
     "analysis": "analyses",
     "lint": "lint",
 }
@@ -11,7 +11,7 @@ KNOWLEDGE_SEGMENT_KINDS = {segment: kind for kind, segment in KNOWLEDGE_KIND_SEG
 
 KNOWLEDGE_KIND_LABELS = {
     "entity": "지식 문서",
-    "concept": "개념 문서",
+    "keyword": "키워드 문서",
     "analysis": "분석 문서",
     "lint": "Lint Report",
 }

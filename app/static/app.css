@@ -209,9 +209,9 @@ body {
 .legend-line { display: inline-block; width: 28px; height: 3px; margin-right: 6px; vertical-align: middle; }
 .legend-line.hierarchy { background: #b45309; }
 .legend-line.wiki { background: #1d4ed8; border-top: 3px dashed #1d4ed8; height: 0; }
-.legend-line.concept-source { background: #0f766e; }
-.legend-line.concept-related { background: #1d4ed8; border-top: 3px dashed #1d4ed8; height: 0; }
-.legend-line.synthesis-concept { background: #334155; }
+.legend-line.keyword-source { background: #0f766e; }
+.legend-line.keyword-related { background: #1d4ed8; border-top: 3px dashed #1d4ed8; height: 0; }
+.legend-line.synthesis-keyword { background: #334155; }
 
 .assistant-fab {
   position: fixed;
@@ -440,6 +440,35 @@ body {
   font: inherit;
   font-weight: 700;
   cursor: pointer;
+}
+
+.editor-card {
+  gap: 18px;
+}
+
+.editor-form {
+  display: grid;
+  gap: 14px;
+}
+
+.editor-textarea {
+  width: 100%;
+  min-height: 65vh;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 18px;
+  font: inherit;
+  line-height: 1.6;
+  background: #fffdf8;
+  color: var(--ink);
+}
+
+.editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  align-items: center;
 }
 
 @media (max-width: 960px) {

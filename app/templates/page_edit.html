@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}{{ page_title }} 편집{% endblock %}
+{% block content %}
+<article class="page-card editor-card">
+  <nav class="page-breadcrumbs" aria-label="breadcrumb">
+    <a href="/">전체</a>
+    <span>/</span>
+    <a href="/spaces/{{ selected_space }}">{{ selected_space_name or selected_space }}</a>
+    <span>/</span>
+    <a href="{{ cancel_href }}">{{ page_title }}</a>
+    <span>/</span>
+    <span>편집</span>
+  </nav>
+  <header class="page-header">
+    <span class="eyebrow">{{ selected_space_name or selected_space }}</span>
+    <h1>{{ page_title }} 편집</h1>
+    <div class="page-submeta">
+      <span>Markdown 직접 편집</span>
+    </div>
+  </header>
+  {% if edit_notice %}
+  <div class="history-banner">
+    <span>{{ edit_notice }}</span>
+  </div>
+  {% endif %}
+  <form class="editor-form" action="{{ form_action }}" method="post">
+    <textarea class="editor-textarea" name="body" rows="24" spellcheck="false">{{ body_markdown }}</textarea>
+    <div class="editor-actions">
+      <a class="source-link" href="{{ cancel_href }}">취소</a>
+      <button type="submit" class="hero-link">저장</button>
+    </div>
+  </form>
+</article>
+{% endblock %}

@@ -20,8 +20,8 @@
 
   const simulation = d3.forceSimulation(payload.nodes)
     .force("link", d3.forceLink(payload.edges).id(d => d.id).distance(d => {
-      if (d.type === "hierarchy" || d.type === "synthesis-concept") return 90;
-      if (d.type === "concept-source") return 120;
+      if (d.type === "hierarchy" || d.type === "synthesis-keyword") return 90;
+      if (d.type === "keyword-source") return 120;
       return 140;
     }))
     .force("charge", d3.forceManyBody().strength(-210))
@@ -33,14 +33,14 @@
     .join("line")
     .attr("stroke", d => {
       if (d.type === "hierarchy") return "#b45309";
-      if (d.type === "concept-source") return "#0f766e";
-      if (d.type === "concept-related") return "#1d4ed8";
-      if (d.type === "analysis-concept") return "#9a3412";
-      if (d.type === "synthesis-concept") return "#334155";
+      if (d.type === "keyword-source") return "#0f766e";
+      if (d.type === "keyword-related") return "#1d4ed8";
+      if (d.type === "analysis-keyword") return "#9a3412";
+      if (d.type === "synthesis-keyword") return "#334155";
       return "#1d4ed8";
     })
-    .attr("stroke-width", d => d.type === "hierarchy" || d.type === "synthesis-concept" ? 2.2 : 1.6)
-    .attr("stroke-dasharray", d => d.type === "concept-related" || d.type === "analysis-concept" ? "6 4" : null)
+    .attr("stroke-width", d => d.type === "hierarchy" || d.type === "synthesis-keyword" ? 2.2 : 1.6)
+    .attr("stroke-dasharray", d => d.type === "keyword-related" || d.type === "analysis-keyword" ? "6 4" : null)
     .attr("stroke-opacity", 0.65);
 
   const node = svg.append("g")

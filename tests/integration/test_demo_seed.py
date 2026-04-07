@@ -20,7 +20,8 @@ def test_demo_seed_populates_pages_assets_and_graph(tmp_path, sample_settings_di
 
     home = client.get("/")
     assert home.status_code == 200
-    assert "핵심 개념" in home.text
+    assert "운영" in home.text
+    assert "핵심 개념" not in home.text
     assert "ARCH" in home.text
 
     page = client.get("/spaces/DEMO/pages/demo-home-9001")
@@ -42,13 +43,22 @@ def test_demo_seed_populates_pages_assets_and_graph(tmp_path, sample_settings_di
 
     synthesis_file = tmp_path / "wiki" / "spaces" / "DEMO" / "synthesis.md"
     assert synthesis_file.exists()
-    assert "DEMO Synthesis" in synthesis_file.read_text(encoding="utf-8")
+    assert "# Synthesis" in synthesis_file.read_text(encoding="utf-8")
 
     entity_file = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "entities" / "demo-home-9001.md"
-    concept_file = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "concepts" / "core-topics.md"
+    keyword_file = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords" / "운영.md"
+    unexpected_keyword_files = {
+        tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords" / "td.md",
+        tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords" / "tr.md",
+        tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords" / "th.md",
+        tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords" / "wiki.md",
+        tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords" / "confluence.md",
+        tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords" / "데모.md",
+    }
     lint_file = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "lint" / "report.md"
     assert entity_file.exists()
-    assert concept_file.exists()
+    assert keyword_file.exists()
+    assert not any(path.exists() for path in unexpected_keyword_files)
     assert lint_file.exists()
 
     knowledge_page = client.get("/spaces/DEMO/knowledge/entities/demo-home-9001")
@@ -61,9 +71,10 @@ def test_demo_seed_populates_pages_assets_and_graph(tmp_path, sample_settings_di
 
     index_text = (tmp_path / "wiki" / "spaces" / "DEMO" / "index.md").read_text(encoding="utf-8")
     assert "## Entities" in index_text
-    assert "## Concepts" in index_text
+    assert "## Keywords" in index_text
     assert "## Lint" in index_text
-    assert "DEMO 핵심 개념" in index_text
+    assert "운영" in index_text
+    assert "핵심 개념" not in index_text
 
     graph = client.get("/api/graph")
     assert graph.status_code == 200

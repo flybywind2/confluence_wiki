@@ -317,11 +317,11 @@ def test_incremental_sync_appends_log_entries_and_creates_synthesis_page(tmp_pat
 
     assert log_text.count("sync | DEMO | incremental") == 2
     assert "[[spaces/DEMO/pages/root-page-100|Root Page]]" in log_text
-    assert "# DEMO Synthesis" in synthesis_text
+    assert "# Synthesis" in synthesis_text
     assert "[[spaces/DEMO/pages/root-page-100|Root Page]]" in synthesis_text
 
 
-def test_incremental_sync_creates_multiple_concept_documents(tmp_path, sample_settings_dict):
+def test_incremental_sync_creates_multiple_keyword_documents(tmp_path, sample_settings_dict):
     from app.core.config import Settings
 
     sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
@@ -342,14 +342,15 @@ def test_incremental_sync_creates_multiple_concept_documents(tmp_path, sample_se
 
     service.run_incremental(space_key="DEMO")
 
-    concept_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "concepts"
-    concept_files = sorted(path.name for path in concept_root.glob("*.md"))
+    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_files = sorted(path.name for path in keyword_root.glob("*.md"))
 
-    assert "core-topics.md" in concept_files
-    assert len(concept_files) >= 2
+    assert "운영.md" in keyword_files
+    assert "동기화.md" in keyword_files
+    assert len(keyword_files) >= 2
 
 
-def test_clustered_concept_contains_representative_docs_and_open_questions(tmp_path, sample_settings_dict):
+def test_keyword_page_contains_related_docs_and_related_keywords(tmp_path, sample_settings_dict):
     from app.core.config import Settings
 
     sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
@@ -370,12 +371,12 @@ def test_clustered_concept_contains_representative_docs_and_open_questions(tmp_p
 
     service.run_incremental(space_key="DEMO")
 
-    concept_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "concepts"
-    clustered = next(path for path in concept_root.glob("*.md") if path.name != "core-topics.md")
-    content = clustered.read_text(encoding="utf-8")
+    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_page = keyword_root / "운영.md"
+    content = keyword_page.read_text(encoding="utf-8")
 
-    assert "## 대표 문서" in content
-    assert "## 남은 질문" in content
+    assert "## 관련 문서" in content
+    assert "## 관련 키워드" in content
 
 
 def test_page_slug_stays_stable_when_title_changes(tmp_path, sample_settings_dict):

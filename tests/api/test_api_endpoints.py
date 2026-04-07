@@ -52,7 +52,8 @@ def test_home_page_shows_knowledge_docs_by_default(tmp_path, sample_settings_dic
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "핵심 개념" in response.text
+    assert "운영" in response.text
+    assert "핵심 개념" not in response.text
     assert "Confluence Wiki Demo 홈" not in response.text
     assert 'href="/spaces/DEMO/pages/ops-dashboard-9002"' not in response.text
 
@@ -74,7 +75,7 @@ def test_search_prefers_knowledge_docs_and_hides_raw_pages_by_default(tmp_path, 
 
     assert response.status_code == 200
     assert "동기화 런북" not in response.text
-    assert "핵심 개념" in response.text or "분석" in response.text or "Concept" in response.text
+    assert "동기화" in response.text or "운영" in response.text or "분석" in response.text
 
 
 def test_graph_endpoint_can_return_knowledge_graph_nodes(tmp_path, sample_settings_dict):
@@ -94,5 +95,5 @@ def test_graph_endpoint_can_return_knowledge_graph_nodes(tmp_path, sample_settin
 
     assert response.status_code == 200
     payload = response.json()
-    assert any(node.get("kind") == "concept" for node in payload["nodes"])
-    assert all(edge["type"] in {"concept-source", "concept-related", "analysis-concept", "synthesis-concept"} for edge in payload["edges"])
+    assert any(node.get("kind") == "keyword" for node in payload["nodes"])
+    assert all(edge["type"] in {"keyword-source", "keyword-related", "analysis-keyword", "synthesis-keyword"} for edge in payload["edges"])

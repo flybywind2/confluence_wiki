@@ -44,7 +44,7 @@ def test_search_page_shows_query_context_and_result_count(tmp_path, sample_setti
     assert response.status_code == 200
     assert "검색 결과" in response.text
     assert "런북" in response.text
-    assert "핵심 개념" in response.text or "운영과 런북" in response.text
+    assert "운영" in response.text or "동기화" in response.text
 
 
 def test_space_home_can_filter_by_kind_and_recent_group(tmp_path, sample_settings_dict):
@@ -54,10 +54,10 @@ def test_space_home_can_filter_by_kind_and_recent_group(tmp_path, sample_setting
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
-    response = client.get("/spaces/DEMO", params={"kind": "concept", "recent": "7d"})
+    response = client.get("/spaces/DEMO", params={"kind": "keyword", "recent": "7d"})
 
     assert response.status_code == 200
-    assert "개념 문서" in response.text
+    assert "키워드 문서" in response.text
     assert "DEMO Lint Report" not in response.text
 
 
@@ -163,7 +163,8 @@ def test_synthesis_route_renders_space_summary(tmp_path, sample_settings_dict):
     response = client.get("/spaces/DEMO/synthesis")
 
     assert response.status_code == 200
-    assert "DEMO Synthesis" in response.text
+    assert "Synthesis" in response.text
+    assert "DEMO Synthesis" not in response.text
     assert "핵심 문서" in response.text
 
 
@@ -193,6 +194,63 @@ def test_knowledge_route_renders_entity_page(tmp_path, sample_settings_dict):
     assert response.status_code == 200
     assert "지식 문서" in response.text
     assert "Confluence Wiki Demo 홈" in response.text
+
+
+def test_knowledge_page_shows_edit_link_and_raw_page_does_not(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+
+    knowledge_response = client.get("/spaces/DEMO/knowledge/keywords/운영")
+    assert knowledge_response.status_code == 200
+    assert '/spaces/DEMO/knowledge/keywords/운영/edit' in knowledge_response.text
+
+    raw_response = client.get("/spaces/DEMO/pages/demo-home-9001")
+    assert raw_response.status_code == 200
+    assert '/spaces/DEMO/pages/demo-home-9001/edit' not in raw_response.text
+
+
+def test_knowledge_edit_form_renders_markdown_body(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    response = client.get("/spaces/DEMO/knowledge/keywords/운영/edit")
+
+    assert response.status_code == 200
+    assert "<textarea" in response.text
+    assert "키워드" in response.text
+
+
+def test_knowledge_edit_save_updates_rendered_content(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    new_body = "# 운영\n\n수정된 본문입니다.\n\n- 새 메모"
+
+    response = client.post(
+        "/spaces/DEMO/knowledge/keywords/운영/edit",
+        data={"body": new_body},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].endswith("/spaces/DEMO/knowledge/keywords/%EC%9A%B4%EC%98%81")
+
+    rendered = client.get("/spaces/DEMO/knowledge/keywords/운영")
+    assert rendered.status_code == 200
+    assert "수정된 본문입니다." in rendered.text
+
+    keyword_file = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords" / "운영.md"
+    assert "수정된 본문입니다." in keyword_file.read_text(encoding="utf-8")
 
 
 def test_history_route_backfills_current_version_when_snapshot_path_is_missing(tmp_path, sample_settings_dict):

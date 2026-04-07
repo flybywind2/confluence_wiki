@@ -14,8 +14,8 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 - 문서별 history snapshot 저장
 - append-only `log.md` 운영 로그
 - space별 `synthesis.md` 누적 요약 페이지
-- `knowledge/entities`, `knowledge/concepts`, `knowledge/analyses`, `knowledge/lint` 지식 레이어
-- 기본 UI는 `concept`, `analysis`, `lint`, `synthesis` 중심의 knowledge-first 노출
+- `knowledge/entities`, `knowledge/keywords`, `knowledge/analyses`, `knowledge/lint` 지식 레이어
+- 기본 UI는 `keyword`, `analysis`, `lint`, `synthesis` 중심의 knowledge-first 노출
 - raw Confluence page는 내부 근거와 direct URL용으로 유지
 - 복잡한 표는 HTML fallback
 - 이미지 로컬 저장 + VLM 기반 한국어 설명
@@ -38,7 +38,7 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 - wiki: markdown 파일 기반 영속 위키
 - schema: [AGENTS.md](./AGENTS.md)
 
-질문 응답도 일회성 채팅으로 끝내지 않고 `knowledge/analyses/` 아래 markdown로 저장해 다시 위키의 일부로 관리합니다. 사용자가 기본 UI에서 보는 것은 raw page 목록이 아니라 knowledge 문서 계층입니다.
+질문 응답도 일회성 채팅으로 끝내지 않고 `knowledge/analyses/` 아래 markdown로 저장해 다시 위키의 일부로 관리합니다. 사용자가 기본 UI에서 보는 것은 raw page 목록이 아니라 keyword 중심 knowledge 문서 계층입니다.
 
 저장되는 markdown는 웹 UI 전용 포맷이 아니라 Obsidian vault에서도 바로 탐색할 수 있는 형식으로 유지합니다.
 
@@ -293,7 +293,7 @@ Payload 예시:
 - 문서 이력: `data/wiki/spaces/<SPACE_KEY>/history/<slug>/v0001.md`
 - 지식 문서:
   - `data/wiki/spaces/<SPACE_KEY>/knowledge/entities/*.md`
-  - `data/wiki/spaces/<SPACE_KEY>/knowledge/concepts/*.md`
+  - `data/wiki/spaces/<SPACE_KEY>/knowledge/keywords/*.md`
   - `data/wiki/spaces/<SPACE_KEY>/knowledge/analyses/*.md`
   - `data/wiki/spaces/<SPACE_KEY>/knowledge/lint/report.md`
 - space 인덱스: `data/wiki/spaces/<SPACE_KEY>/index.md`
@@ -308,15 +308,15 @@ Payload 예시:
 
 ```md
 ---
-title: DEMO 핵심 개념
+title: 운영
 aliases:
-  - DEMO 핵심 개념
+  - 운영
 tags:
   - space/DEMO
-  - kind/concept
+  - kind/keyword
 ---
 
-# DEMO 핵심 개념
+# 운영
 
 - [[spaces/DEMO/pages/root-page-100|Root Page]]
 - ![[spaces/DEMO/assets/diagram.png]]
@@ -332,7 +332,7 @@ tags:
 - `문서 상세`: knowledge 문서 중심, 필요 시 원문 링크와 raw 근거 링크 사용
 - `문서 이력`: 버전 목록과 과거 snapshot 조회
 - `Synthesis`: Space별 누적 요약 페이지
-- `Knowledge`: entity / concept / analysis / lint 문서 렌더링
+- `Knowledge`: entity / keyword / analysis / lint 문서 렌더링
 - `Graph View`: 계층 링크 + 위키 링크 동시 시각화
 - `Wiki Q&A`: 선택된 space 또는 전체 위키 기준 답변, 분석 문서 저장
 
@@ -353,7 +353,7 @@ tags:
   - assets
 - knowledge layer:
   - entity 문서
-  - concept 문서
+  - keyword 문서
   - assistant 저장 analysis 문서
   - lint report
 

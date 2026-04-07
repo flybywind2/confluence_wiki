@@ -17,8 +17,8 @@
   페이지 버전별 snapshot.
 - `spaces/<SPACE>/knowledge/entities/`
   원문 페이지를 기반으로 정리한 entity 문서.
-- `spaces/<SPACE>/knowledge/concepts/`
-  space 수준 개념/주제 문서.
+- `spaces/<SPACE>/knowledge/keywords/`
+  raw page 본문에서 기계적으로 추출한 주요 키워드 문서.
 - `spaces/<SPACE>/knowledge/analyses/`
   질문 결과, 비교표, 해석, 후속 탐구 결과를 저장한 분석 문서.
 - `spaces/<SPACE>/knowledge/lint/report.md`
@@ -33,7 +33,7 @@
 ## Page Rules
 
 - 모든 문서는 YAML frontmatter 를 가진 markdown 파일로 저장한다.
-- 내부 지식 문서는 가능한 한 기존 페이지를 덮어쓰지 말고 관련 entity/concept/analysis 문서를 갱신한다.
+- 내부 지식 문서는 가능한 한 기존 페이지를 덮어쓰지 말고 관련 entity/keyword/analysis 문서를 갱신한다.
 - 링크는 가능한 한 `/spaces/...` 경로 또는 `[[SPACE/slug]]` 형태를 사용한다.
 - 표는 markdown으로 안전하게 표현 가능할 때만 변환하고, 병합 셀이 있으면 HTML table fallback을 유지한다.
 - 이미지는 로컬 asset으로 저장하고, 중요한 이미지는 설명 텍스트를 본문에 남긴다.
@@ -42,7 +42,7 @@
 
 1. mirror에서 source를 읽는다.
 2. 최신 page markdown과 version snapshot을 쓴다.
-3. 관련 entity/concept 문서를 갱신한다.
+3. 관련 entity/keyword 문서를 갱신한다.
 4. `index.md`, `synthesis.md`, `log.md`, `graph.json` 을 갱신한다.
 5. 필요 시 `lint/report.md` 를 다시 생성한다.
 

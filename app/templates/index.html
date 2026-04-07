@@ -35,7 +35,7 @@
       <span>문서 유형</span>
       <select name="kind">
         <option value="all" {% if selected_kind == 'all' %}selected{% endif %}>전체</option>
-        <option value="concept" {% if selected_kind == 'concept' %}selected{% endif %}>개념 문서</option>
+        <option value="keyword" {% if selected_kind == 'keyword' %}selected{% endif %}>키워드 문서</option>
         <option value="analysis" {% if selected_kind == 'analysis' %}selected{% endif %}>분석 문서</option>
         <option value="lint" {% if selected_kind == 'lint' %}selected{% endif %}>Lint Report</option>
       </select>
@@ -55,7 +55,7 @@
 <section class="list-card">
   <div class="section-header">
     <h2>{% if search_query %}검색 결과{% else %}최근 문서{% endif %}</h2>
-    <span>{{ pages|length }}건{% if selected_kind and selected_kind != 'all' %} · {{ '개념 문서' if selected_kind == 'concept' else '분석 문서' if selected_kind == 'analysis' else 'Lint Report' }}{% endif %}{% if selected_recent and selected_recent != 'all' %} · {{ selected_recent }}{% endif %}</span>
+    <span>{{ pages|length }}건{% if selected_kind and selected_kind != 'all' %} · {{ '키워드 문서' if selected_kind == 'keyword' else '분석 문서' if selected_kind == 'analysis' else 'Lint Report' }}{% endif %}{% if selected_recent and selected_recent != 'all' %} · {{ selected_recent }}{% endif %}</span>
   </div>
   {% if pages %}
   <ul class="page-list">

@@ -5,15 +5,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import APIRouter, Form, Header, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import or_, select
 
-from app.core.knowledge import knowledge_href, knowledge_label, normalize_knowledge_kind
-from app.core.markdown import read_markdown_body, render_markdown
+from app.core.knowledge import knowledge_href, knowledge_label, knowledge_segment, normalize_knowledge_kind
+from app.core.markdown import read_markdown_body, read_markdown_document, render_markdown
 from app.db.models import KnowledgeDocument, Page, PageVersion, Space, WikiDocument
 from app.graph.builder import build_graph_payload, build_knowledge_graph_payload
+from app.services.wiki_writer import write_markdown_file
+from app.services.knowledge_service import KnowledgeService
 from app.services.sync_service import SyncService
 from app.services.wiki_qa import WikiQAService
 
@@ -55,8 +57,26 @@ def _space_name_by_key(spaces: list[Space]) -> dict[str, str]:
     return {space.space_key: _space_display_name(space) for space in spaces}
 
 
+def _display_document_title(space_key: str, title: str | None) -> str:
+    normalized = str(title or "").strip()
+    prefix = f"{space_key} "
+    if normalized.startswith(prefix):
+        return normalized[len(prefix) :]
+    return normalized
+
+
+def _is_editable_knowledge_kind(kind: str) -> bool:
+    return normalize_knowledge_kind(kind) in {"keyword", "analysis", "lint"}
+
+
 def _history_snapshot_path(request: Request, space_key: str, slug: str, version_number: int) -> Path:
     return _settings(request).wiki_root / "spaces" / space_key / "history" / slug / f"v{version_number:04d}.md"
+
+
+def _edit_notice(page_kind: str) -> str | None:
+    if page_kind in {"keyword", "lint", "synthesis"}:
+        return "이 문서는 다음 동기화 또는 재생성 작업에서 다시 덮어써질 수 있습니다."
+    return None
 
 
 def _page_result_item(page: Page, space_key: str, space_name: str) -> dict:
@@ -74,7 +94,7 @@ def _page_result_item(page: Page, space_key: str, space_name: str) -> dict:
 
 def _knowledge_result_item(doc: KnowledgeDocument, space_key: str, space_name: str) -> dict:
     return {
-        "title": doc.title,
+        "title": _display_document_title(space_key, doc.title),
         "slug": doc.slug,
         "space_key": space_key,
         "space_name": space_name,
@@ -86,7 +106,7 @@ def _knowledge_result_item(doc: KnowledgeDocument, space_key: str, space_name: s
 
 
 def _is_user_visible_knowledge(doc: KnowledgeDocument) -> bool:
-    return normalize_knowledge_kind(doc.kind) in {"concept", "analysis", "lint"}
+    return normalize_knowledge_kind(doc.kind) in {"keyword", "analysis", "lint"}
 
 
 def _parse_recent_days(value: str | None) -> int | None:
@@ -235,8 +255,9 @@ async def knowledge_view(request: Request, space_key: str, kind: str, slug: str)
         body_html = render_markdown(read_markdown_body(markdown_path))
         spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
         space_name_by_key = _space_name_by_key(spaces)
+        display_title = _display_document_title(space_key, doc.title)
         page_obj = SimpleNamespace(
-            title=doc.title,
+            title=display_title,
             prod_url=None,
             updated_at_remote=doc.updated_at,
             current_version=None,
@@ -261,7 +282,8 @@ async def knowledge_view(request: Request, space_key: str, kind: str, slug: str)
                 "history_href": None,
                 "history_notice": None,
                 "current_page_href": None,
-                "meta_description": _meta_description(doc.summary or doc.title),
+                "edit_href": f"/spaces/{space_key}/knowledge/{knowledge_segment(normalized_kind)}/{slug}/edit" if _is_editable_knowledge_kind(normalized_kind) else None,
+                "meta_description": _meta_description(doc.summary or display_title),
             },
         )
     finally:
@@ -287,16 +309,17 @@ async def synthesis_view(request: Request, space_key: str) -> HTMLResponse:
                 "space_name_by_key": space_name_by_key,
                 "selected_space": space_key,
                 "selected_space_name": space_name_by_key.get(space_key, space_key),
-                "page": {"title": f"{space_key} Synthesis", "prod_url": None},
+                "page": {"title": "Synthesis", "prod_url": None},
                 "page_space_key": space_key,
                 "page_space_name": space_name_by_key.get(space_key, space_key),
                 "body_html": body_html,
                 "page_kind": "synthesis",
-                "meta_description": _meta_description(f"{space_key} synthesis"),
+                "meta_description": _meta_description("Synthesis"),
                 "history_versions": [],
                 "history_href": None,
                 "history_notice": None,
                 "current_page_href": None,
+                "edit_href": f"/spaces/{space_key}/synthesis/edit",
             },
         )
     finally:
@@ -394,6 +417,7 @@ async def page_history_version(request: Request, space_key: str, slug: str, vers
                 "history_href": f"/spaces/{space_key}/pages/{slug}/history",
                 "history_notice": history_notice,
                 "current_page_href": f"/spaces/{space_key}/pages/{slug}",
+                "edit_href": None,
                 "meta_description": _meta_description(version.summary or page.title),
             },
         )
@@ -434,6 +458,7 @@ async def page_view(request: Request, space_key: str, slug: str) -> HTMLResponse
                 "history_href": f"/spaces/{space_key}/pages/{slug}/history",
                 "history_notice": None,
                 "current_page_href": None,
+                "edit_href": None,
                 "meta_description": _meta_description(wiki_document.summary or page.title),
             },
         )
@@ -557,6 +582,114 @@ async def api_search(request: Request, q: str = Query(default=""), space: str | 
         return results
     finally:
         session.close()
+
+
+@router.get("/spaces/{space_key}/knowledge/{kind}/{slug}/edit", response_class=HTMLResponse)
+async def knowledge_edit_form(request: Request, space_key: str, kind: str, slug: str) -> HTMLResponse:
+    session = _session_factory(request)()
+    try:
+        normalized_kind = normalize_knowledge_kind(kind)
+        if not _is_editable_knowledge_kind(normalized_kind):
+            raise HTTPException(status_code=404, detail="Knowledge page not editable")
+        doc = session.scalar(
+            select(KnowledgeDocument)
+            .join(Space, Space.id == KnowledgeDocument.space_id)
+            .where(Space.space_key == space_key, KnowledgeDocument.kind == normalized_kind, KnowledgeDocument.slug == slug)
+        )
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Knowledge page not found")
+        markdown_path = _settings(request).wiki_root / doc.markdown_path
+        _frontmatter, body_markdown = read_markdown_document(markdown_path)
+        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        space_name_by_key = _space_name_by_key(spaces)
+        display_title = _display_document_title(space_key, doc.title)
+        return _templates(request).TemplateResponse(
+            request,
+            "page_edit.html",
+            {
+                "request": request,
+                "spaces": spaces,
+                "space_name_by_key": space_name_by_key,
+                "selected_space": space_key,
+                "selected_space_name": space_name_by_key.get(space_key, space_key),
+                "page_title": display_title,
+                "page_kind": normalized_kind,
+                "body_markdown": body_markdown,
+                "form_action": f"/spaces/{space_key}/knowledge/{knowledge_segment(normalized_kind)}/{slug}/edit",
+                "cancel_href": knowledge_href(space_key, normalized_kind, slug),
+                "edit_notice": _edit_notice(normalized_kind),
+                "meta_description": _meta_description(f"{display_title} 편집"),
+            },
+        )
+    finally:
+        session.close()
+
+
+@router.post("/spaces/{space_key}/knowledge/{kind}/{slug}/edit")
+async def knowledge_edit_save(
+    request: Request,
+    space_key: str,
+    kind: str,
+    slug: str,
+    body: str = Form(...),
+) -> RedirectResponse:
+    try:
+        result = KnowledgeService(_settings(request)).update_document_body(space_key=space_key, kind=kind, slug=slug, body=body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=result["href"], status_code=303)
+
+
+@router.get("/spaces/{space_key}/synthesis/edit", response_class=HTMLResponse)
+async def synthesis_edit_form(request: Request, space_key: str) -> HTMLResponse:
+    session = _session_factory(request)()
+    try:
+        synthesis_path = _settings(request).wiki_root / "spaces" / space_key / "synthesis.md"
+        if not synthesis_path.exists():
+            raise HTTPException(status_code=404, detail="Synthesis not found")
+        _frontmatter, body_markdown = read_markdown_document(synthesis_path)
+        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        space_name_by_key = _space_name_by_key(spaces)
+        return _templates(request).TemplateResponse(
+            request,
+            "page_edit.html",
+            {
+                "request": request,
+                "spaces": spaces,
+                "space_name_by_key": space_name_by_key,
+                "selected_space": space_key,
+                "selected_space_name": space_name_by_key.get(space_key, space_key),
+                "page_title": "Synthesis",
+                "page_kind": "synthesis",
+                "body_markdown": body_markdown,
+                "form_action": f"/spaces/{space_key}/synthesis/edit",
+                "cancel_href": f"/spaces/{space_key}/synthesis",
+                "edit_notice": _edit_notice("synthesis"),
+                "meta_description": _meta_description("Synthesis 편집"),
+            },
+        )
+    finally:
+        session.close()
+
+
+@router.post("/spaces/{space_key}/synthesis/edit")
+async def synthesis_edit_save(
+    request: Request,
+    space_key: str,
+    body: str = Form(...),
+) -> RedirectResponse:
+    content = body.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="body is required")
+    synthesis_path = _settings(request).wiki_root / "spaces" / space_key / "synthesis.md"
+    if not synthesis_path.exists():
+        raise HTTPException(status_code=404, detail="Synthesis not found")
+    frontmatter, _existing_body = read_markdown_document(synthesis_path)
+    frontmatter["title"] = "Synthesis"
+    frontmatter["aliases"] = ["Synthesis"]
+    frontmatter["updated_at"] = datetime.now().isoformat()
+    write_markdown_file(synthesis_path, frontmatter, content)
+    return RedirectResponse(url=f"/spaces/{space_key}/synthesis", status_code=303)
 
 
 @router.get("/api/graph")

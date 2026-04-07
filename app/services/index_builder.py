@@ -28,7 +28,7 @@ def build_space_index(
     grouped_knowledge: dict[str, list[dict[str, str]]] = defaultdict(list)
     kind_titles = {
         "entity": "Entities",
-        "concept": "Concepts",
+        "keyword": "Keywords",
         "analysis": "Analyses",
         "lint": "Lint",
     }
@@ -42,7 +42,7 @@ def build_space_index(
             summary = doc.get("summary") or ""
             lines.append(f"- {_doc_reference(doc, space_key)}: {summary}".rstrip(": "))
         lines.append("")
-    for section_title in ("Entities", "Concepts", "Analyses", "Lint"):
+    for section_title in ("Entities", "Keywords", "Analyses", "Lint"):
         items = grouped_knowledge.get(section_title, [])
         if not items:
             continue
@@ -115,7 +115,7 @@ def build_space_synthesis(
     recent_log_entries: list[str],
 ) -> Path:
     space_root = root / "spaces" / space_key
-    lines = [f"# {space_key} Synthesis", "", f"- generated_at: {generated_at.isoformat()}", ""]
+    lines = ["# Synthesis", "", f"- generated_at: {generated_at.isoformat()}", ""]
     if documents:
         lines.extend(["## 핵심 문서", ""])
         for doc in sorted(documents, key=lambda item: item["title"].lower()):
@@ -132,8 +132,8 @@ def build_space_synthesis(
     return write_markdown_file(
         target,
         {
-            "title": f"{space_key} Synthesis",
-            "aliases": [f"{space_key} Synthesis"],
+            "title": "Synthesis",
+            "aliases": ["Synthesis"],
             "tags": [f"space/{space_key}", "kind/synthesis"],
         },
         "\n".join(lines).strip(),

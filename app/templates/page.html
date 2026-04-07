@@ -31,6 +31,9 @@
       <span>현재 버전 · {{ page.current_version }}</span>
       {% endif %}
       <div class="page-actions">
+        {% if edit_href %}
+        <a class="source-link" href="{{ edit_href }}">편집</a>
+        {% endif %}
         {% if history_href %}
         <a class="source-link" href="{{ history_href }}">문서 이력</a>
         {% endif %}

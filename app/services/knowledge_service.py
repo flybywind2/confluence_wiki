@@ -5,20 +5,24 @@ from datetime import datetime
 import re
 import uuid
 
+from bs4 import BeautifulSoup
 from sqlalchemy import delete, select
+from slugify import slugify
 
 from app.core.config import Settings, get_settings
 from app.core.knowledge import knowledge_href, normalize_knowledge_kind
-from app.core.markdown import read_markdown_body
+from app.core.markdown import read_markdown_body, read_markdown_document
 from app.core.obsidian import knowledge_link, page_link
 from app.core.slugs import page_slug
 from app.db.models import KnowledgeDocument, Page, PageLink, Space, WikiDocument
 from app.db.session import create_session_factory
 from app.llm.text_client import TextLLMClient
 from app.services.index_builder import append_space_log, build_global_index, build_space_index
-from app.services.wiki_writer import write_knowledge_markdown
+from app.services.wiki_writer import write_knowledge_markdown, write_markdown_file
 
 TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+MARKDOWN_LINK_RE = re.compile(r"\[(?P<label>[^\]]+)\]\((?P<href>[^)]+)\)")
+WIKI_LINK_RE = re.compile(r"!\[\[(?P<embed>[^\]]+)\]\]|\[\[(?P<target>[^\]|]+)(?:\|(?P<label>[^\]]+))?\]\]")
 STOPWORDS = {
     "위키",
     "문서",
@@ -28,7 +32,27 @@ STOPWORDS = {
     "현재",
     "space",
     "demo",
+    "wiki",
+    "confluence",
     "arch",
+    "데모",
+    "메모",
+    "관련",
+    "현재",
+    "구성",
+    "확인",
+    "표시",
+    "정상",
+    "샘플",
+    "이미지",
+    "버튼",
+    "링크",
+    "화면",
+    "적용",
+    "point",
+    "td",
+    "tr",
+    "th",
 }
 
 
@@ -54,11 +78,12 @@ class KnowledgeService:
         space = session.scalar(select(Space).where(Space.space_key == space_key))
         if space is None:
             return []
+        existing_keyword_tokens = self._existing_keyword_tokens(session, space.id)
 
         session.execute(
             delete(KnowledgeDocument).where(
                 KnowledgeDocument.space_id == space.id,
-                KnowledgeDocument.kind.in_(["entity", "concept"]),
+                KnowledgeDocument.kind.in_(["entity", "concept", "keyword"]),
             )
         )
         session.flush()
@@ -77,6 +102,7 @@ class KnowledgeService:
             body = read_markdown_body(markdown_path) if markdown_path.exists() else ""
             summary = wiki_document.summary or self._first_line(body)
             fact_card = self.text_client.summarize_fact_card(page.title, body)
+            token_counts = self._extract_keyword_counts(space.space_key, page.title, summary, body)
             fact_cards.append(
                 {
                     "title": page.title,
@@ -85,6 +111,7 @@ class KnowledgeService:
                     "href": f"/spaces/{space_key}/pages/{page.slug}",
                     "fact_card": fact_card,
                     "body": body,
+                    "token_counts": token_counts,
                 }
             )
             entity_body = "\n".join(
@@ -125,30 +152,17 @@ class KnowledgeService:
                 )
             )
 
-        concept_body = self._build_core_topics_body(space_key, page_rows)
-        docs.append(
-            self._upsert_document(
-                session=session,
-                space=space,
-                kind="concept",
-                slug="core-topics",
-                title=f"{space_key} 핵심 개념",
-                summary=f"{space_key} space의 주요 주제와 연결을 정리한 개념 문서",
-                body=concept_body,
-                source_refs="\n".join(f"/spaces/{space_key}/pages/{page.slug}" for page, _ in page_rows),
-            )
-        )
-        for concept in self._build_cluster_concepts(space_key, fact_cards):
+        for keyword in self._build_keyword_documents(space_key, fact_cards, existing_keyword_tokens):
             docs.append(
                 self._upsert_document(
                     session=session,
                     space=space,
-                    kind="concept",
-                    slug=concept["slug"],
-                    title=concept["title"],
-                    summary=concept["summary"],
-                    body=concept["body"],
-                    source_refs="\n".join(concept["source_refs"]),
+                    kind="keyword",
+                    slug=keyword["slug"],
+                    title=keyword["title"],
+                    summary=keyword["summary"],
+                    body=keyword["body"],
+                    source_refs="\n".join(keyword["source_refs"]),
                 )
             )
         return docs
@@ -236,6 +250,72 @@ class KnowledgeService:
             space.space_key,
             "analysis-save",
             saved_at,
+            [{"title": doc.title, "slug": doc.slug, "kind": doc.kind, "href": knowledge_href(space.space_key, doc.kind, doc.slug)}],
+        )
+        return {
+            "kind": doc.kind,
+            "slug": doc.slug,
+            "title": doc.title,
+            "href": knowledge_href(space_key, doc.kind, doc.slug),
+        }
+
+    def update_document_body(self, space_key: str, kind: str, slug: str, body: str) -> dict[str, str]:
+        session = self.session_factory()
+        try:
+            result = self.update_document_body_with_session(session, space_key, kind, slug, body)
+            session.commit()
+            return result
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def update_document_body_with_session(
+        self,
+        session,
+        space_key: str,
+        kind: str,
+        slug: str,
+        body: str,
+    ) -> dict[str, str]:
+        normalized_kind = normalize_knowledge_kind(kind)
+        if normalized_kind not in {"keyword", "analysis", "lint"}:
+            raise ValueError("editing is only allowed for user-visible knowledge documents")
+        content = body.strip()
+        if not content:
+            raise ValueError("body is required")
+
+        space = session.scalar(select(Space).where(Space.space_key == space_key))
+        if space is None:
+            raise ValueError("unknown space")
+        doc = session.scalar(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.space_id == space.id,
+                KnowledgeDocument.kind == normalized_kind,
+                KnowledgeDocument.slug == slug,
+            )
+        )
+        if doc is None:
+            raise ValueError("knowledge document not found")
+
+        markdown_path = self.settings.wiki_root / doc.markdown_path
+        frontmatter, _existing_body = read_markdown_document(markdown_path)
+        updated_at = datetime.now()
+        summary = self.text_client.summarize(content) or self._first_line(content)
+        frontmatter["title"] = doc.title
+        frontmatter["updated_at"] = updated_at.isoformat()
+        write_markdown_file(markdown_path, frontmatter, content)
+
+        doc.summary = summary
+        doc.updated_at = updated_at
+        session.flush()
+        self._rebuild_indexes_for_space(session, space)
+        append_space_log(
+            self.settings.wiki_root,
+            space.space_key,
+            "knowledge-edit",
+            updated_at,
             [{"title": doc.title, "slug": doc.slug, "kind": doc.kind, "href": knowledge_href(space.space_key, doc.kind, doc.slug)}],
         )
         return {
@@ -359,58 +439,60 @@ class KnowledgeService:
                 return stripped[:180]
         return ""
 
-    def _build_core_topics_body(self, space_key: str, page_rows: list[tuple[Page, WikiDocument]]) -> str:
-        summaries = [wiki_document.summary or page.title for page, wiki_document in page_rows]
-        tokens = [
-            token.lower()
-            for summary in summaries
-            for token in TOKEN_RE.findall(summary)
-            if token.lower() not in STOPWORDS
-        ]
-        top_terms = [token for token, _count in Counter(tokens).most_common(6)]
-        lines = [f"# {space_key} 핵심 개념", "", "이 문서는 현재 space의 주요 주제와 연결을 정리한 개념 문서입니다.", "", "## 주요 문서", ""]
-        for page, wiki_document in sorted(page_rows, key=lambda item: item[0].title.lower()):
-            lines.append(f"- {page_link(space_key, page.slug, page.title)}: {wiki_document.summary or page.title}")
-        lines.extend(["", "## 핵심 키워드", ""])
-        if top_terms:
-            lines.extend(f"- {term}" for term in top_terms)
-        else:
-            lines.append("- 키워드 추출 결과가 부족합니다.")
-        return "\n".join(lines)
-
-    def _build_cluster_concepts(self, space_key: str, fact_cards: list[dict[str, str]]) -> list[dict[str, str]]:
-        if len(fact_cards) < 2:
+    def _build_keyword_documents(
+        self,
+        space_key: str,
+        fact_cards: list[dict[str, str]],
+        existing_keywords: set[str],
+    ) -> list[dict[str, str]]:
+        if not fact_cards:
             return []
-        groups: dict[str, list[dict[str, str]]] = {}
-        for item in fact_cards:
-            topic = self._classify_topic(item["title"], item["summary"], item["body"])
-            groups.setdefault(topic, []).append(item)
 
-        concepts: list[dict[str, str]] = []
-        for topic, items in sorted(groups.items()):
-            title = f"{space_key} {topic}"
-            synthesized = self.text_client.synthesize_concept(space_key, title, items)
-            concepts.append(
+        total_counts: Counter[str] = Counter()
+        doc_counts: Counter[str] = Counter()
+        for item in fact_cards:
+            token_counts = item["token_counts"]
+            total_counts.update(token_counts)
+            for token in token_counts:
+                doc_counts[token] += 1
+
+        eligible = {
+            token
+            for token, count in total_counts.items()
+            if doc_counts[token] >= 2 or count >= 3 or token in existing_keywords
+        }
+        if not eligible:
+            eligible = {token for token, _count in total_counts.most_common(6)}
+
+        keyword_pages: dict[str, list[dict[str, str]]] = {}
+        co_occurrence: dict[str, Counter[str]] = {}
+        for item in fact_cards:
+            selected_keywords = self._select_keywords_for_page(item["token_counts"], total_counts, doc_counts, eligible)
+            if not selected_keywords:
+                continue
+            for keyword in selected_keywords:
+                keyword_pages.setdefault(keyword, []).append(item)
+            for keyword in selected_keywords:
+                neighbors = [candidate for candidate in selected_keywords if candidate != keyword]
+                co_occurrence.setdefault(keyword, Counter()).update(neighbors)
+
+        documents: list[dict[str, str]] = []
+        for keyword, items in sorted(
+            keyword_pages.items(),
+            key=lambda pair: (-doc_counts[pair[0]], -total_counts[pair[0]], pair[0]),
+        ):
+            related_keywords = [candidate for candidate, _count in co_occurrence.get(keyword, Counter()).most_common(6)]
+            synthesized = self.text_client.synthesize_keyword_page(space_key, keyword, items, related_keywords)
+            documents.append(
                 {
-                    "slug": page_slug(topic, len(items)),
-                    "title": title,
-                    "summary": self._cluster_summary(topic, items),
-                    "body": self._ensure_cluster_sections(space_key, title, items, synthesized),
+                    "slug": self._keyword_slug(keyword),
+                    "title": keyword,
+                    "summary": self._keyword_summary(keyword, items),
+                    "body": self._ensure_keyword_sections(space_key, keyword, items, related_keywords, synthesized),
                     "source_refs": [page_link(space_key, item["slug"], item["title"]) for item in items],
                 }
             )
-        return concepts
-
-    @staticmethod
-    def _classify_topic(title: str, summary: str, body: str) -> str:
-        text = f"{title} {summary} {body}".lower()
-        if any(token in text for token in ("런북", "장애", "재시도", "배치", "동기화", "sync")):
-            return "운영과 런북"
-        if any(token in text for token in ("대시보드", "지표", "sla", "경보", "모니터")):
-            return "운영 지표와 모니터링"
-        if any(token in text for token in ("권한", "정책", "보안", "인증")):
-            return "권한과 정책"
-        return "핵심 주제"
+        return documents
 
     @staticmethod
     def _source_href(item: dict[str, str]) -> str:
@@ -422,26 +504,28 @@ class KnowledgeService:
         return knowledge_link(space_key, kind, slug, str(item.get("title") or slug))
 
     @staticmethod
-    def _cluster_summary(topic: str, items: list[dict[str, str]]) -> str:
+    def _keyword_summary(topic: str, items: list[dict[str, str]]) -> str:
         titles = ", ".join(item["title"] for item in items[:2])
         if len(items) > 2:
             titles = f"{titles} 외 {len(items) - 2}건"
-        return f"{topic} 주제에서 확인할 핵심 문서: {titles}"
+        return f"{topic} 키워드와 직접 연결되는 문서: {titles}"
 
-    def _ensure_cluster_sections(
+    def _ensure_keyword_sections(
         self,
         space_key: str,
         title: str,
         items: list[dict[str, str]],
+        related_keywords: list[str],
         body: str,
     ) -> str:
         section_requirements = {
-            "## 개요": self._default_overview(space_key, title, items),
+            "## 개요": self._default_keyword_overview(space_key, title, items),
             "## 핵심 사실": "\n".join(f"- {item['title']}: {item['summary']}" for item in items) or "- 정보 없음",
-            "## 운영 포인트": "\n".join(f"- {item['title']} 문서 기준 운영 포인트 확인" for item in items[:3]),
-            "## 대표 문서": "\n".join(self._page_reference(space_key, item) for item in items[: min(2, len(items))]),
             "## 관련 문서": "\n".join(self._page_reference(space_key, item) for item in items),
-            "## 남은 질문": "\n".join(self._default_open_questions(items)),
+            "## 관련 키워드": "\n".join(
+                f"- {knowledge_link(space_key, 'keyword', self._keyword_slug(keyword), keyword)}" for keyword in related_keywords if keyword != title
+            )
+            or "- 관련 키워드가 아직 충분히 추출되지 않았습니다.",
             "## 원문 근거": "\n".join(self._page_reference(space_key, item) for item in items),
         }
         normalized = body.strip()
@@ -453,19 +537,70 @@ class KnowledgeService:
         return normalized.strip()
 
     @staticmethod
-    def _default_overview(space_key: str, title: str, items: list[dict[str, str]]) -> str:
+    def _default_keyword_overview(space_key: str, title: str, items: list[dict[str, str]]) -> str:
         if not items:
-            return f"{space_key} space의 {title} 관련 문서를 묶은 개념 문서입니다."
-        return f"{space_key} space에서 {title} 주제를 빠르게 파악할 수 있도록 관련 원문을 묶어 정리한 문서입니다."
-
-    @staticmethod
-    def _default_open_questions(items: list[dict[str, str]]) -> list[str]:
-        doc_names = ", ".join(item["title"] for item in items[:2]) if items else "관련 문서"
-        return [
-            f"- {doc_names} 사이의 책임 경계와 운영 순서가 최신 상태로 유지되는지 확인이 필요합니다.",
-            "- 최근 변경 이후에도 관련 지표, 런북, 정책 문서가 서로 일관되는지 검토가 필요합니다.",
-        ]
+            return f"{space_key} space에서 '{title}' 키워드와 연결되는 문서를 묶은 페이지입니다."
+        return f"{space_key} space에서 '{title}' 키워드가 반복적으로 등장하는 원문을 모아 빠르게 파악할 수 있게 정리한 문서입니다."
 
     @staticmethod
     def _page_reference(space_key: str, item: dict[str, str]) -> str:
         return f"- {page_link(space_key, item['slug'], item['title'])}"
+
+    def _existing_keyword_tokens(self, session, space_id: int) -> set[str]:
+        existing_docs = session.scalars(
+            select(KnowledgeDocument).where(KnowledgeDocument.space_id == space_id, KnowledgeDocument.kind == "keyword")
+        ).all()
+        return {self._normalize_keyword_token(doc.title) for doc in existing_docs if doc.title}
+
+    def _extract_keyword_counts(self, space_key: str, title: str, summary: str, body: str) -> Counter[str]:
+        normalized_body = self._normalize_keyword_source(body)
+        weighted_text = " ".join([title] * 3 + [summary] * 2 + [normalized_body])
+        counts: Counter[str] = Counter()
+        for token in TOKEN_RE.findall(weighted_text):
+            normalized = self._normalize_keyword_token(token)
+            if not normalized or normalized in STOPWORDS or normalized == space_key.lower():
+                continue
+            counts[normalized] += 1
+        return counts
+
+    @staticmethod
+    def _normalize_keyword_token(token: str) -> str:
+        return str(token or "").strip().lower()
+
+    @staticmethod
+    def _normalize_keyword_source(body: str) -> str:
+        text = str(body or "")
+        text = WIKI_LINK_RE.sub(lambda match: match.group("label") or match.group("target") or "", text)
+        text = MARKDOWN_LINK_RE.sub(lambda match: match.group("label"), text)
+        text = text.replace("![[", "[[")
+        return BeautifulSoup(text, "html.parser").get_text(" ", strip=True)
+
+    @staticmethod
+    def _keyword_slug(keyword: str) -> str:
+        return slugify(keyword, allow_unicode=True) or "keyword"
+
+    @staticmethod
+    def _select_keywords_for_page(
+        token_counts: Counter[str],
+        total_counts: Counter[str],
+        doc_counts: Counter[str],
+        eligible: set[str],
+    ) -> list[str]:
+        ranked = [
+            token
+            for token, _count in sorted(
+                token_counts.items(),
+                key=lambda item: (-item[1], -doc_counts[item[0]], -total_counts[item[0]], item[0]),
+            )
+            if token in eligible
+        ]
+        if ranked:
+            return ranked[:3]
+        fallback = [
+            token
+            for token, _count in sorted(
+                token_counts.items(),
+                key=lambda item: (-item[1], -doc_counts[item[0]], -total_counts[item[0]], item[0]),
+            )
+        ]
+        return fallback[:1]

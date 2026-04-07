@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from markdown_it import MarkdownIt
+import yaml
 from app.core.knowledge import knowledge_segment
 
 _WIKI_LINK_RE = re.compile(r"(?<!\!)\[\[([^\]]+)\]\]")
@@ -45,6 +46,21 @@ def strip_frontmatter(content: str) -> str:
     return content[marker + 4 :].lstrip()
 
 
+def split_frontmatter(content: str) -> tuple[dict, str]:
+    if not content.startswith("---"):
+        return {}, content
+    marker = content.find("\n---", 3)
+    if marker == -1:
+        return {}, content
+    frontmatter_text = content[4:marker]
+    body = content[marker + 4 :].lstrip()
+    try:
+        frontmatter = yaml.safe_load(frontmatter_text) or {}
+    except yaml.YAMLError:
+        frontmatter = {}
+    return frontmatter, body
+
+
 def render_markdown(markdown_text: str) -> str:
     def _route_for_target(target: str) -> str | None:
         parts = target.strip("/").split("/")
@@ -82,3 +98,7 @@ def render_markdown(markdown_text: str) -> str:
 
 def read_markdown_body(path: Path) -> str:
     return strip_frontmatter(path.read_text(encoding="utf-8"))
+
+
+def read_markdown_document(path: Path) -> tuple[dict, str]:
+    return split_frontmatter(path.read_text(encoding="utf-8"))
