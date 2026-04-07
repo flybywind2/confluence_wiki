@@ -1,6 +1,8 @@
 import pytest
+import httpx
 
-from app.clients.confluence import ConfluenceClient
+import app.clients.confluence as confluence_module
+from app.clients.confluence import ConfluenceClient, MissingAttachmentRedirect
 from app.core.config import Settings
 
 
@@ -126,3 +128,37 @@ def test_download_target_rejects_relative_path_escape(sample_settings_dict):
 
     with pytest.raises(ValueError):
         client._resolve_download_url("../../evil.png")
+
+
+class _RedirectingAsyncClient:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def get(self, target_url):
+        request = httpx.Request("GET", target_url)
+        return httpx.Response(
+            302,
+            headers={"location": "/pages/attachmentnotfound.action?pageId=100&filename=diagram.png"},
+            request=request,
+        )
+
+
+@pytest.mark.asyncio
+async def test_download_bytes_raises_missing_attachment_redirect_for_attachmentnotfound_302(
+    sample_settings_dict, monkeypatch
+):
+    settings = Settings.model_validate(sample_settings_dict)
+    client = ConfluenceClient(settings)
+
+    monkeypatch.setattr(confluence_module.httpx, "AsyncClient", _RedirectingAsyncClient)
+
+    with pytest.raises(MissingAttachmentRedirect) as exc_info:
+        await client.download_bytes("/download/attachments/100/diagram.png")
+
+    assert "attachmentnotfound" in exc_info.value.location.casefold()

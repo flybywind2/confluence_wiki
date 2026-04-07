@@ -10,6 +10,22 @@ from app.clients.rate_limit import MinuteRateLimiter, get_shared_rate_limiter
 from app.core.config import Settings, get_settings
 
 
+class MissingAttachmentRedirect(RuntimeError):
+    def __init__(self, download_path: str, location: str) -> None:
+        self.download_path = download_path
+        self.location = location
+        super().__init__(f"missing attachment redirect for {download_path}: {location}")
+
+
+def is_missing_attachment_redirect(exc: BaseException) -> bool:
+    if isinstance(exc, MissingAttachmentRedirect):
+        return True
+    if not isinstance(exc, httpx.HTTPStatusError) or exc.response is None:
+        return False
+    location = exc.response.headers.get("location", "")
+    return exc.response.status_code in {301, 302, 303, 307, 308} and "attachmentnotfound" in location.casefold()
+
+
 class ConfluenceClient:
     def __init__(self, settings: Settings | None = None, limiter: MinuteRateLimiter | None = None) -> None:
         self.settings = settings or get_settings()
@@ -133,6 +149,9 @@ class ConfluenceClient:
             verify=self.verify_ssl,
         ) as client:
             response = await client.get(target_url)
+            location = response.headers.get("location", "")
+            if response.status_code in {301, 302, 303, 307, 308} and "attachmentnotfound" in location.casefold():
+                raise MissingAttachmentRedirect(download_path=download_path, location=location)
             response.raise_for_status()
             return response.content
 

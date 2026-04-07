@@ -34,10 +34,14 @@ def main() -> int:
     configure_logging(args.verbose)
     service = SyncService(settings=get_settings())
 
+    result = None
     if args.command == "bootstrap":
-        service.run_bootstrap(space_key=args.space, root_page_id=args.page_id)
+        result = service.run_bootstrap(space_key=args.space, root_page_id=args.page_id)
     elif args.command == "sync":
-        service.run_incremental(space_key=args.space)
+        result = service.run_incremental(space_key=args.space)
+    if result and result.skipped_attachments:
+        for item in result.skipped_attachments:
+            print(f"- {item}")
     return 0
 
 

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import httpx
 from sqlalchemy import func, select
 
 from app.db.models import Asset, Page, PageVersion, WikiDocument
@@ -79,6 +80,20 @@ class RejectingExternalImageConfluenceClient(FakeConfluenceClient):
         return await super().download_bytes(download_path)
 
 
+class MissingAttachmentRedirectConfluenceClient(FakeConfluenceClient):
+    async def download_bytes(self, download_path: str):
+        request = httpx.Request("GET", f"https://mirror.example.com{download_path}")
+        raise httpx.HTTPStatusError(
+            "Redirect response '302 Found' for url 'https://mirror.example.com/download/attachments/100/diagram.png'",
+            request=request,
+            response=httpx.Response(
+                302,
+                headers={"location": "/pages/attachmentnotfound.action?pageId=100&filename=diagram.png"},
+                request=request,
+            ),
+        )
+
+
 class RecordingConfluenceClient(FakeConfluenceClient):
     def __init__(self, events: list[str], **kwargs):
         super().__init__(**kwargs)
@@ -139,7 +154,11 @@ def test_incremental_sync_emits_verbose_attachment_logs(tmp_path, sample_setting
 
     service = SyncService(
         settings=settings,
-        confluence_client=FakeConfluenceClient(include_attachment=True),
+        confluence_client=FakeConfluenceClient(
+            include_attachment=True,
+            search_ids=["100"],
+            body_overrides={"100": '<ac:image><ri:attachment ri:filename="diagram.png"></ri:attachment></ac:image>'},
+        ),
         vision_client=FakeVisionClient(),
     )
 
@@ -208,7 +227,15 @@ def test_repeat_sync_does_not_duplicate_assets_or_versions(tmp_path, sample_sett
     sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
     settings = Settings.model_validate(sample_settings_dict)
 
-    service = SyncService(settings=settings, confluence_client=FakeConfluenceClient(include_attachment=True), vision_client=FakeVisionClient())
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            include_attachment=True,
+            search_ids=["100"],
+            body_overrides={"100": '<ac:image><ri:attachment ri:filename="diagram.png"></ri:attachment></ac:image>'},
+        ),
+        vision_client=FakeVisionClient(),
+    )
     service.run_incremental(space_key="DEMO")
     service.run_incremental(space_key="DEMO")
 
@@ -513,3 +540,147 @@ def test_external_body_image_reference_is_preserved_when_mirror_download_is_reje
     markdown = (tmp_path / "wiki" / "spaces" / "DEMO" / "pages" / "root-page-100.md").read_text(encoding="utf-8")
 
     assert "![외부구성도](https://cdn.example.com/diagram.png)" in markdown
+
+
+def test_attachmentnotfound_redirect_is_skipped_and_reported_in_result(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=MissingAttachmentRedirectConfluenceClient(
+            include_attachment=True,
+            search_ids=["100"],
+            body_overrides={"100": '<ac:image><ri:attachment ri:filename="diagram.png"></ri:attachment></ac:image>'},
+        ),
+        vision_client=FakeVisionClient(),
+    )
+
+    result = service.run_incremental(space_key="DEMO")
+
+    session = service.session_factory()
+    try:
+        page_id = session.scalar(select(Page.id).where(Page.confluence_page_id == "100"))
+        asset_count = session.scalar(select(func.count(Asset.id)).where(Asset.page_id == page_id))
+    finally:
+        session.close()
+
+    assert result.processed_pages == 1
+    assert result.processed_assets == 0
+    assert result.skipped_attachments == ["DEMO/100 diagram.png"]
+    assert asset_count == 0
+
+
+def test_unreferenced_attachment_image_is_not_saved_or_rendered(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100"],
+            body_overrides={"100": "<p>본문에는 이미지가 없습니다.</p>"},
+            attachment_overrides={
+                "100": [
+                    {
+                        "id": "att-1",
+                        "filename": "diagram.png",
+                        "mime_type": "image/png",
+                        "download": "/download/attachments/100/diagram.png",
+                    }
+                ]
+            },
+        ),
+        vision_client=FakeVisionClient(),
+    )
+
+    service.run_incremental(space_key="DEMO")
+    markdown = (tmp_path / "wiki" / "spaces" / "DEMO" / "pages" / "root-page-100.md").read_text(encoding="utf-8")
+
+    session = service.session_factory()
+    try:
+        page_id = session.scalar(select(Page.id).where(Page.confluence_page_id == "100"))
+        asset_count = session.scalar(select(func.count(Asset.id)).where(Asset.page_id == page_id))
+    finally:
+        session.close()
+
+    assert "## 이미지" not in markdown
+    assert "![[spaces/DEMO/assets/diagram.png]]" not in markdown
+    assert asset_count == 0
+
+
+def test_non_image_attachments_are_left_as_source_links_without_local_storage(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100"],
+            body_overrides={"100": "<p>첨부 파일을 확인하세요.</p>"},
+            attachment_overrides={
+                "100": [
+                    {
+                        "id": "att-2",
+                        "filename": "runbook.pdf",
+                        "mime_type": "application/pdf",
+                        "download": "/download/attachments/100/runbook.pdf",
+                    }
+                ]
+            },
+        ),
+    )
+
+    service.run_incremental(space_key="DEMO")
+    markdown = (tmp_path / "wiki" / "spaces" / "DEMO" / "pages" / "root-page-100.md").read_text(encoding="utf-8")
+
+    session = service.session_factory()
+    try:
+        page_id = session.scalar(select(Page.id).where(Page.confluence_page_id == "100"))
+        asset_count = session.scalar(select(func.count(Asset.id)).where(Asset.page_id == page_id))
+    finally:
+        session.close()
+
+    assert "## 첨부 파일" in markdown
+    assert "[runbook.pdf](https://prod.example.com/confluence/download/attachments/100/runbook.pdf)" in markdown
+    assert asset_count == 0
+
+
+def test_body_image_attachmentnotfound_redirect_is_skipped_and_keeps_sync_running(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=MissingAttachmentRedirectConfluenceClient(
+            search_ids=["100"],
+            body_overrides={
+                "100": (
+                    "<p>앞 문장</p>"
+                    "<p><img src=\"/download/attachments/100/missing-inline.png\" alt=\"누락이미지\" /></p>"
+                    "<p>뒤 문장</p>"
+                )
+            },
+            attachment_overrides={"100": []},
+        ),
+    )
+
+    result = service.run_incremental(space_key="DEMO")
+    markdown = (tmp_path / "wiki" / "spaces" / "DEMO" / "pages" / "root-page-100.md").read_text(encoding="utf-8")
+
+    assert result.skipped_attachments == ["DEMO/100 missing-inline.png"]
+    assert "앞 문장" in markdown
+    assert "누락이미지" in markdown
+    assert "뒤 문장" in markdown

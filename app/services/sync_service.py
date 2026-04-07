@@ -3,16 +3,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import yaml
 from sqlalchemy import delete, select
 
-from app.clients.confluence import ConfluenceClient
+from app.clients.confluence import ConfluenceClient, is_missing_attachment_redirect
 from app.core.config import Settings, get_settings
 from app.core.knowledge import knowledge_href
 from app.core.obsidian import asset_target, page_link
@@ -53,6 +53,7 @@ class SyncResult:
     space_key: str
     processed_pages: int
     processed_assets: int
+    skipped_attachments: list[str] = field(default_factory=list)
 
 
 class SyncService:
@@ -142,6 +143,7 @@ class SyncService:
 
         session = self.session_factory()
         processed_assets = 0
+        skipped_attachments: list[str] = []
         try:
             logger.info("sync start mode=%s space=%s pages=%s", mode, space_key, len(unique_page_ids))
             space = upsert_space(session, space_key=space_key, root_page_id=root_page_id)
@@ -194,31 +196,49 @@ class SyncService:
 
                 session.execute(delete(Asset).where(Asset.page_id == page_record.id))
 
+                body_image_refs = self._extract_body_image_references(markdown_body)
                 downloaded_assets: dict[str, dict[str, str | None]] = {}
+                attachment_links: list[str] = []
                 for attachment in await self.confluence_client.list_attachments(raw_page["id"]):
                     if not attachment.get("download"):
+                        continue
+                    attachment_filename = self._normalize_attachment_name(attachment["filename"])
+                    mime_type = attachment.get("mime_type")
+                    is_image_attachment = is_image_filename(attachment_filename) or bool((mime_type or "").startswith("image/"))
+                    if not is_image_attachment:
+                        attachment_links.append(
+                            self._build_attachment_link_markdown(attachment_filename, attachment["download"])
+                        )
+                        continue
+                    if attachment_filename not in body_image_refs:
                         continue
                     logger.debug(
                         "downloading attachment page_id=%s filename=%s",
                         raw_page["id"],
-                        attachment["filename"],
+                        attachment_filename,
                     )
-                    asset_info = await self._materialize_asset(
-                        session=session,
-                        page_record=page_record,
-                        space_key=space_key,
-                        filename=attachment["filename"],
-                        download_path=attachment["download"],
-                        confluence_attachment_id=attachment.get("id"),
-                        mime_type=attachment.get("mime_type"),
-                    )
+                    try:
+                        asset_info = await self._materialize_asset(
+                            session=session,
+                            page_record=page_record,
+                            space_key=space_key,
+                            filename=attachment_filename,
+                            download_path=attachment["download"],
+                            confluence_attachment_id=attachment.get("id"),
+                            mime_type=mime_type,
+                        )
+                    except Exception as exc:
+                        if not is_missing_attachment_redirect(exc):
+                            raise
+                        skipped_attachments.append(f"{space_key}/{raw_page['id']} {attachment_filename}")
+                        continue
                     if asset_info is not None:
-                        downloaded_assets[attachment["filename"]] = asset_info
+                        downloaded_assets[attachment_filename] = asset_info
                         processed_assets += 1
                         logger.debug(
                             "downloaded asset page_id=%s filename=%s image=%s",
                             raw_page["id"],
-                            attachment["filename"],
+                            attachment_filename,
                             asset_info.get("is_image"),
                         )
 
@@ -228,6 +248,7 @@ class SyncService:
                     space_key=space_key,
                     markdown_body=markdown_body,
                     downloaded_assets=downloaded_assets,
+                    skipped_attachments=skipped_attachments,
                 )
                 downloaded_assets.update(new_body_assets)
                 processed_assets += len(new_body_assets)
@@ -252,6 +273,8 @@ class SyncService:
 
                 if trailing_images:
                     markdown_body = markdown_body + "\n\n## 이미지\n\n" + "\n\n".join(trailing_images)
+                if attachment_links:
+                    markdown_body = markdown_body + "\n\n## 첨부 파일\n\n" + "\n".join(attachment_links)
 
                 frontmatter = {
                     "space_key": space_key,
@@ -415,7 +438,13 @@ class SyncService:
                 processed_assets,
             )
 
-            return SyncResult(mode=mode, space_key=space_key, processed_pages=len(raw_pages), processed_assets=processed_assets)
+            return SyncResult(
+                mode=mode,
+                space_key=space_key,
+                processed_pages=len(raw_pages),
+                processed_assets=processed_assets,
+                skipped_attachments=skipped_attachments,
+            )
         except Exception:
             session.rollback()
             logger.exception("sync failed mode=%s space=%s", mode, space_key)
@@ -438,6 +467,46 @@ class SyncService:
     @staticmethod
     def _image_reference_name(value: str) -> str:
         return Path(unquote(urlparse(value).path)).name
+
+    @staticmethod
+    def _normalize_attachment_name(value: str) -> str:
+        return Path(unquote(value)).name
+
+    def _extract_body_image_references(self, markdown_body: str) -> set[str]:
+        references: set[str] = set()
+        for match in BODY_IMAGE_PLACEHOLDER_RE.finditer(markdown_body):
+            kind = match.group("kind")
+            value = match.group("value").strip()
+            if kind == "attachment":
+                normalized = self._normalize_attachment_name(value)
+            else:
+                normalized = self._image_reference_name(value)
+            if normalized:
+                references.add(normalized)
+        return references
+
+    def _build_attachment_link_markdown(self, filename: str, download_path: str) -> str:
+        return f"- [{filename}]({self._build_prod_download_url(download_path)})"
+
+    def _build_prod_download_url(self, download_path: str) -> str:
+        parsed = urlparse(download_path)
+        if not parsed.scheme and not parsed.netloc:
+            if download_path.startswith("/"):
+                return f"{self.settings.conf_prod_base_url.rstrip('/')}/{download_path.lstrip('/')}"
+            return urljoin(self.settings.conf_prod_base_url.rstrip("/") + "/", download_path)
+
+        mirror = urlparse(self.settings.conf_mirror_base_url)
+        prod = urlparse(self.settings.conf_prod_base_url)
+        allowed_hosts = {mirror.netloc, prod.netloc}
+        if parsed.netloc not in allowed_hosts:
+            return download_path
+
+        for candidate in (prod.path.rstrip("/"), mirror.path.rstrip("/")):
+            if candidate and (parsed.path == candidate or parsed.path.startswith(f"{candidate}/")):
+                base_path = parsed.path[len(candidate) :]
+                query = f"?{parsed.query}" if parsed.query else ""
+                return f"{self.settings.conf_prod_base_url.rstrip('/')}/{base_path.lstrip('/')}{query}"
+        return download_path
 
     async def _materialize_asset(
         self,
@@ -491,6 +560,7 @@ class SyncService:
         space_key: str,
         markdown_body: str,
         downloaded_assets: dict[str, dict[str, str | bool | None]],
+        skipped_attachments: list[str],
     ) -> tuple[str, set[str], dict[str, dict[str, str | bool | None]]]:
         if not BODY_IMAGE_PLACEHOLDER_RE.search(markdown_body):
             return markdown_body, set(), {}
@@ -538,6 +608,11 @@ class SyncService:
                         rendered_parts.append(f"![{alt_text}]({value})")
                         cursor = match.end()
                         continue
+                    except Exception as exc:
+                        if not is_missing_attachment_redirect(exc):
+                            raise
+                        skipped_attachments.append(f"{space_key}/{page_record.confluence_page_id} {generated_name}")
+                        asset_info = None
                     else:
                         asset_key = str(asset_info["filename"])
                         new_body_assets[asset_key] = asset_info
