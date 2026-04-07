@@ -5,13 +5,13 @@ from pathlib import Path
 from collections import defaultdict
 
 from app.core.obsidian import knowledge_link, page_link
-from app.services.wiki_writer import write_markdown_file
+from app.services.wiki_writer import write_global_document, write_markdown_file
 
 
 def _doc_reference(doc: dict[str, str], space_key: str) -> str:
     title = str(doc.get("title") or doc.get("slug") or "document")
     if doc.get("kind") not in {None, "", "page"}:
-        return knowledge_link(space_key, str(doc.get("kind") or ""), str(doc["slug"]), title)
+        return knowledge_link(str(doc.get("kind") or ""), str(doc["slug"]), title)
     return page_link(space_key, str(doc["slug"]), title)
 
 
@@ -30,9 +30,13 @@ def build_space_index(
         "entity": "Entities",
         "keyword": "Keywords",
         "analysis": "Analyses",
+        "query": "Queries",
         "lint": "Lint",
     }
     for doc in knowledge_documents:
+        source_spaces = set(doc.get("source_spaces") or [])
+        if source_spaces and space_key not in source_spaces:
+            continue
         grouped_knowledge[kind_titles.get(doc.get("kind", ""), "Knowledge")].append(doc)
 
     for title, items in sections:
@@ -42,7 +46,7 @@ def build_space_index(
             summary = doc.get("summary") or ""
             lines.append(f"- {_doc_reference(doc, space_key)}: {summary}".rstrip(": "))
         lines.append("")
-    for section_title in ("Entities", "Keywords", "Analyses", "Lint"):
+    for section_title in ("Entities", "Keywords", "Analyses", "Queries", "Lint"):
         items = grouped_knowledge.get(section_title, [])
         if not items:
             continue
@@ -50,7 +54,7 @@ def build_space_index(
         lines.append("")
         for doc in sorted(items, key=lambda item: item["title"].lower()):
             summary = doc.get("summary") or ""
-            lines.append(f"- [{doc['title']}]({doc['href']}): {summary}".rstrip(": "))
+            lines.append(f"- {_doc_reference(doc, space_key)}: {summary}".rstrip(": "))
         lines.append("")
     target = space_root / "index.md"
     return write_markdown_file(
@@ -140,10 +144,27 @@ def build_space_synthesis(
     )
 
 
-def build_global_index(root: Path, grouped_documents: dict[str, list[dict[str, str]]]) -> Path:
-    global_root = root / "global"
-    global_root.mkdir(parents=True, exist_ok=True)
+def build_global_index(
+    root: Path,
+    grouped_documents: dict[str, list[dict[str, str]]],
+    knowledge_documents: list[dict[str, str]] | None = None,
+) -> Path:
     lines = ["# Global Wiki Index", ""]
+    knowledge_documents = knowledge_documents or []
+    if knowledge_documents:
+        lines.extend(["## Knowledge Pages", ""])
+        grouped_knowledge: dict[str, list[dict[str, str]]] = defaultdict(list)
+        for doc in knowledge_documents:
+            grouped_knowledge[str(doc.get("kind") or "knowledge")].append(doc)
+        for kind, items in sorted(grouped_knowledge.items()):
+            lines.append(f"### {kind.title()}")
+            lines.append("")
+            for doc in sorted(items, key=lambda item: item["title"].lower()):
+                summary = doc.get("summary") or ""
+                source_spaces = ", ".join(doc.get("source_spaces") or [])
+                suffix = f" · sources: {source_spaces}" if source_spaces else ""
+                lines.append(f"- [{doc['title']}]({doc['href']}): {summary}{suffix}".rstrip(": "))
+            lines.append("")
     for space_key, documents in sorted(grouped_documents.items()):
         lines.append(f"## {space_key}")
         for doc in sorted(documents, key=lambda item: item["title"].lower()):
@@ -153,13 +174,13 @@ def build_global_index(root: Path, grouped_documents: dict[str, list[dict[str, s
             else:
                 lines.append(f"- [[{space_key}/{doc['slug']}]]: {summary}".rstrip(": "))
         lines.append("")
-    target = global_root / "index.md"
-    return write_markdown_file(
-        target,
+    return write_global_document(
+        root,
+        "index.md",
+        "\n".join(lines).strip(),
         {
             "title": "Global Wiki Index",
             "aliases": ["Global Wiki Index"],
             "tags": ["kind/global-index"],
         },
-        "\n".join(lines).strip(),
     )

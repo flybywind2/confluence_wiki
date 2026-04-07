@@ -51,6 +51,11 @@ body {
   padding: 11px 12px;
   font: inherit;
 }
+.search-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
 .search-box button {
   background: var(--accent);
   color: white;

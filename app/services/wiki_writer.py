@@ -37,7 +37,13 @@ def write_space_document(root: Path, space_key: str, filename: str, body: str, f
     return write_markdown_file(path, frontmatter, body)
 
 
-def write_knowledge_markdown(root: Path, space_key: str, kind: str, slug: str, frontmatter: dict, body: str) -> Path:
-    knowledge_dir = root / "spaces" / space_key / "knowledge" / knowledge_segment(kind)
+def write_global_document(root: Path, filename: str, body: str, frontmatter: dict | None = None) -> Path:
+    global_dir = root / "global"
+    path = global_dir / filename
+    return write_markdown_file(path, frontmatter, body)
+
+
+def write_knowledge_markdown(root: Path, kind: str, slug: str, frontmatter: dict, body: str) -> Path:
+    knowledge_dir = root / "global" / "knowledge" / knowledge_segment(kind)
     path = knowledge_dir / f"{slug}.md"
     return write_markdown_file(path, frontmatter, body)

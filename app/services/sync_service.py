@@ -14,7 +14,7 @@ from sqlalchemy import delete, select
 
 from app.clients.confluence import ConfluenceClient, is_missing_attachment_redirect
 from app.core.config import Settings, get_settings
-from app.core.knowledge import knowledge_href
+from app.core.knowledge import GLOBAL_KNOWLEDGE_SPACE_KEY, knowledge_href, source_space_keys
 from app.core.obsidian import asset_target, page_link
 from app.core.markdown import extract_wiki_links, resolve_page_placeholders
 from app.core.slugs import page_slug
@@ -29,7 +29,7 @@ from app.services.cql import build_incremental_cql
 from app.services.index_builder import append_space_log, build_global_index, build_space_index, build_space_synthesis, read_space_log_excerpt
 from app.services.knowledge_service import KnowledgeService
 from app.services.lint_service import LintService
-from app.services.space_registry import upsert_space
+from app.services.space_registry import ensure_global_knowledge_space, upsert_space
 from app.services.sync_window import build_day_before_yesterday_window
 from app.services.wiki_writer import write_history_markdown, write_page_markdown
 
@@ -639,21 +639,35 @@ class SyncService:
     def _rebuild_materialized_views(self, session) -> None:
         grouped_documents: dict[str, list[dict[str, str]]] = {}
         all_pages = session.scalars(select(Page)).all()
-        space_lookup = {space.id: space.space_key for space in session.scalars(select(Space)).all()}
+        spaces = session.scalars(select(Space)).all()
+        space_lookup = {space.id: space.space_key for space in spaces}
         knowledge_service = KnowledgeService(self.settings)
         lint_service = LintService(self.settings)
         all_page_documents: list[dict[str, str]] = []
-        all_knowledge_documents: list[dict[str, str]] = []
+        global_space = ensure_global_knowledge_space(session)
+        knowledge_service.rebuild_global_with_session(session)
+        lint_service.rebuild_global_with_session(session)
+        all_knowledge_documents = [
+            {
+                "title": doc.title,
+                "slug": doc.slug,
+                "kind": doc.kind,
+                "summary": doc.summary or "",
+                "href": knowledge_href(doc.kind, doc.slug),
+                "source_refs": doc.source_refs or "",
+                "source_spaces": source_space_keys(doc.source_refs),
+            }
+            for doc in session.scalars(
+                select(KnowledgeDocument).where(KnowledgeDocument.space_id == global_space.id)
+            ).all()
+        ]
         for space_id, space_key in sorted(space_lookup.items(), key=lambda item: item[1]):
-            knowledge_service.rebuild_space_with_session(session, space_key)
-            lint_service.rebuild_space_with_session(session, space_key)
+            if space_key == global_space.space_key:
+                continue
             rows = session.execute(
                 select(Page, WikiDocument)
                 .join(WikiDocument, WikiDocument.page_id == Page.id)
                 .where(Page.space_id == space_id)
-            ).all()
-            knowledge_rows = session.scalars(
-                select(KnowledgeDocument).where(KnowledgeDocument.space_id == space_id)
             ).all()
             documents = [
                 {
@@ -666,22 +680,9 @@ class SyncService:
                 }
                 for page, _wiki_document in rows
             ]
-            knowledge_documents = [
-                {
-                    "title": doc.title,
-                    "slug": doc.slug,
-                    "space_key": space_key,
-                    "kind": doc.kind,
-                    "summary": doc.summary or "",
-                    "href": knowledge_href(space_key, doc.kind, doc.slug),
-                    "source_refs": doc.source_refs or "",
-                }
-                for doc in knowledge_rows
-            ]
-            grouped_documents[space_key] = [*documents, *knowledge_documents]
+            grouped_documents[space_key] = [*documents]
             all_page_documents.extend(documents)
-            all_knowledge_documents.extend(knowledge_documents)
-            build_space_index(self.settings.wiki_root, space_key, documents, knowledge_documents)
+            build_space_index(self.settings.wiki_root, space_key, documents, all_knowledge_documents)
             build_space_synthesis(
                 self.settings.wiki_root,
                 space_key,

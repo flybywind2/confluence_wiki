@@ -5,8 +5,13 @@
   <nav class="page-breadcrumbs" aria-label="breadcrumb">
     <a href="/">전체</a>
     <span>/</span>
+    {% if page_space_key and page_space_key != 'global' %}
     <a href="/spaces/{{ page_space_key }}">{{ page_space_name or page_space_key }}</a>
     <span>/</span>
+    {% else %}
+    <a href="/">통합 지식</a>
+    <span>/</span>
+    {% endif %}
     <span>{{ page.title }}</span>
   </nav>
   {% if history_notice %}
@@ -18,7 +23,13 @@
   </div>
   {% endif %}
   <header class="page-header">
-    <span class="eyebrow">{{ page_space_name or page_space_key }}</span>
+    <span class="eyebrow">
+      {% if knowledge_source_spaces %}
+      {{ knowledge_source_spaces | join(', ') }}
+      {% else %}
+      {{ page_space_name or page_space_key }}
+      {% endif %}
+    </span>
     <h1>{{ page.title }}</h1>
     <div class="page-submeta">
       {% if page_badge %}
@@ -44,6 +55,23 @@
     </div>
   </header>
   <section class="wiki-body">{{ body_html | safe }}</section>
+  {% if source_links %}
+  <section class="history-panel">
+    <div class="section-header">
+      <h2>원본 링크</h2>
+    </div>
+    <ul class="page-list history-list">
+      {% for source in source_links %}
+      <li>
+        <span>{{ source.title }}</span>
+        <span class="page-meta">
+          <a class="source-link" href="{{ source.prod_url }}" target="_blank" rel="noreferrer">Confluence 원문</a>
+        </span>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
   {% if history_versions %}
   <section class="history-panel">
     <div class="section-header">

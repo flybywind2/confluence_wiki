@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import re
 
-from app.core.knowledge import knowledge_href, normalize_knowledge_kind
+from app.core.knowledge import knowledge_href, normalize_knowledge_kind, source_space_keys
 
 
 def _space_color(space_key: str) -> str:
@@ -20,6 +20,7 @@ def _kind_color(kind: str, space_key: str) -> str:
     return {
         "keyword": "#0f766e",
         "analysis": "#9a3412",
+        "query": "#7c3aed",
         "synthesis": "#1d4ed8",
         "page": _space_color(space_key),
     }.get(kind, _space_color(space_key))
@@ -37,6 +38,8 @@ def _extract_refs(text: str) -> list[dict[str, str]]:
             refs.append({"space_key": parts[1], "kind": "page", "slug": parts[3]})
         elif len(parts) >= 5 and parts[0] == "spaces" and parts[2] == "knowledge":
             refs.append({"space_key": parts[1], "kind": normalize_knowledge_kind(parts[3]), "slug": parts[4]})
+        elif len(parts) >= 3 and parts[0] == "knowledge":
+            refs.append({"space_key": "global", "kind": normalize_knowledge_kind(parts[1]), "slug": parts[2]})
     for match in PATH_RE.finditer(raw_text):
         target = match.group("href").strip()
         parts = target.strip("/").split("/")
@@ -44,6 +47,8 @@ def _extract_refs(text: str) -> list[dict[str, str]]:
             refs.append({"space_key": parts[1], "kind": "page", "slug": parts[3]})
         elif len(parts) >= 5 and parts[0] == "spaces" and parts[2] == "knowledge":
             refs.append({"space_key": parts[1], "kind": normalize_knowledge_kind(parts[3]), "slug": parts[4]})
+        elif len(parts) >= 3 and parts[0] == "knowledge":
+            refs.append({"space_key": "global", "kind": normalize_knowledge_kind(parts[1]), "slug": parts[2]})
     return refs
 
 
@@ -89,8 +94,11 @@ def build_knowledge_graph_payload(
     keyword_page_refs: dict[str, set[tuple[str, str]]] = {}
 
     def register_node(node: dict) -> None:
-        if selected_space and node.get("space_key") != selected_space:
-            return
+        if selected_space:
+            if node.get("kind") == "page" and node.get("space_key") != selected_space:
+                return
+            if node.get("kind") != "page" and selected_space not in set(node.get("source_spaces") or [node.get("space_key")]):
+                return
         nodes[node["id"]] = node
 
     def register_edge(source: str, target: str, edge_type: str) -> None:
@@ -99,32 +107,36 @@ def build_knowledge_graph_payload(
         edges[(source, target, edge_type)] = {"source": source, "target": target, "type": edge_type}
 
     for doc in knowledge_documents:
-        space_key = doc["space_key"]
-        kind = normalize_knowledge_kind(doc["kind"])
-        if kind not in {"keyword", "analysis"}:
+        source_spaces = doc.get("source_spaces") or source_space_keys(doc.get("source_refs"))
+        if selected_space and selected_space not in set(source_spaces):
             continue
-        node_id = f"knowledge:{space_key}:{kind}:{doc['slug']}"
+        kind = normalize_knowledge_kind(doc["kind"])
+        if kind not in {"keyword", "analysis", "query"}:
+            continue
+        node_id = f"knowledge:{kind}:{doc['slug']}"
         register_node(
             {
                 "id": node_id,
                 "title": doc["title"],
-                "space_key": space_key,
+                "space_key": "global",
+                "source_spaces": source_spaces,
                 "slug": doc["slug"],
                 "kind": kind,
-                "href": knowledge_href(space_key, kind, doc["slug"]),
-                "color": _kind_color(kind, space_key),
+                "href": knowledge_href(kind, doc["slug"]),
+                "color": _kind_color(kind, "global"),
             }
         )
         if kind == "keyword":
-            keyword_nodes_by_space.setdefault(space_key, []).append(node_id)
+            for source_space in source_spaces:
+                keyword_nodes_by_space.setdefault(source_space, []).append(node_id)
             keyword_page_refs[node_id] = set()
 
     for doc in knowledge_documents:
-        space_key = doc["space_key"]
+        source_spaces = doc.get("source_spaces") or source_space_keys(doc.get("source_refs"))
         kind = normalize_knowledge_kind(doc["kind"])
-        if kind not in {"keyword", "analysis"}:
+        if kind not in {"keyword", "analysis", "query"}:
             continue
-        node_id = f"knowledge:{space_key}:{kind}:{doc['slug']}"
+        node_id = f"knowledge:{kind}:{doc['slug']}"
         if node_id not in nodes:
             continue
         refs = _extract_refs(doc.get("source_refs") or "")
@@ -152,14 +164,15 @@ def build_knowledge_graph_payload(
                 register_edge(node_id, page_node_id, "keyword-source")
         if kind == "analysis":
             referenced_keywords = {
-                f"knowledge:{ref['space_key']}:{normalize_knowledge_kind(ref['kind'])}:{ref['slug']}"
+                f"knowledge:{normalize_knowledge_kind(ref['kind'])}:{ref['slug']}"
                 for ref in refs
                 if normalize_knowledge_kind(ref["kind"]) == "keyword"
             }
             if not referenced_keywords:
                 referenced_keywords = {
                     keyword_id
-                    for keyword_id in keyword_nodes_by_space.get(space_key, [])
+                    for source_space in source_spaces
+                    for keyword_id in keyword_nodes_by_space.get(source_space, [])
                     if doc["slug"] != keyword_id.rsplit(":", 1)[-1]
                 }
             for keyword_id in sorted(referenced_keywords):
@@ -172,7 +185,8 @@ def build_knowledge_graph_payload(
             {
                 "id": synthesis_id,
                 "title": "Synthesis",
-                "space_key": space_key,
+                "space_key": "global",
+                "source_spaces": [space_key],
                 "slug": "synthesis",
                 "kind": "synthesis",
                 "href": f"/spaces/{space_key}/synthesis",

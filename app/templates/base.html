@@ -28,7 +28,10 @@
           {% if selected_space and selected_space != 'all' %}
           <input type="hidden" name="space" value="{{ selected_space }}" />
           {% endif %}
-          <button type="submit">검색</button>
+          <div class="search-actions">
+            <button type="submit">검색</button>
+            <button type="submit" formaction="/knowledge/generate" formmethod="post">위키 작성</button>
+          </div>
         </form>
       </aside>
       <main class="content">

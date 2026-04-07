@@ -75,7 +75,7 @@ def test_search_prefers_knowledge_docs_and_hides_raw_pages_by_default(tmp_path, 
 
     assert response.status_code == 200
     assert 'href="/spaces/DEMO/pages/sync-runbook-9003"' not in response.text
-    assert 'href="/spaces/DEMO/knowledge/keywords/동기화-런북"' in response.text
+    assert 'href="/knowledge/keywords/동기화-런북"' in response.text
 
 
 def test_graph_endpoint_can_return_knowledge_graph_nodes(tmp_path, sample_settings_dict):
@@ -97,3 +97,24 @@ def test_graph_endpoint_can_return_knowledge_graph_nodes(tmp_path, sample_settin
     payload = response.json()
     assert any(node.get("kind") == "keyword" for node in payload["nodes"])
     assert all(edge["type"] in {"keyword-source", "keyword-related", "analysis-keyword", "synthesis-keyword"} for edge in payload["edges"])
+
+
+def test_query_generation_creates_query_document(tmp_path, sample_settings_dict):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+        }
+    )
+    test_app = create_app(settings=settings, allow_test_fallback=False)
+    seed_demo_content(settings=settings)
+    client = TestClient(test_app)
+
+    response = client.post("/api/wiki-from-query", json={"query": "운영 대시보드"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["kind"] == "query"
+    assert payload["href"].startswith("/knowledge/queries/")

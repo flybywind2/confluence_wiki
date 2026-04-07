@@ -342,7 +342,7 @@ def test_incremental_sync_creates_multiple_keyword_documents(tmp_path, sample_se
 
     service.run_incremental(space_key="DEMO")
 
-    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_root = tmp_path / "wiki" / "global" / "knowledge" / "keywords"
     keyword_files = sorted(path.name for path in keyword_root.glob("*.md"))
 
     assert "운영-대시보드.md" in keyword_files
@@ -371,7 +371,7 @@ def test_keyword_page_contains_related_docs_and_related_keywords(tmp_path, sampl
 
     service.run_incremental(space_key="DEMO")
 
-    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_root = tmp_path / "wiki" / "global" / "knowledge" / "keywords"
     keyword_page = keyword_root / "운영-대시보드.md"
     content = keyword_page.read_text(encoding="utf-8")
 
@@ -404,7 +404,7 @@ def test_ds_department_terms_normalize_without_display_guess(tmp_path, sample_se
 
     service.run_incremental(space_key="DEMO")
 
-    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_root = tmp_path / "wiki" / "global" / "knowledge" / "keywords"
     keyword_files = {path.name for path in keyword_root.glob("*.md")}
 
     assert "ds부문.md" in keyword_files
@@ -438,7 +438,7 @@ def test_weak_title_uses_structural_keywords_from_headings_and_tables(tmp_path, 
 
     service.run_incremental(space_key="DEMO")
 
-    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_root = tmp_path / "wiki" / "global" / "knowledge" / "keywords"
     keyword_files = {path.name for path in keyword_root.glob("*.md")}
 
     assert "hbm.md" in keyword_files
@@ -447,7 +447,7 @@ def test_weak_title_uses_structural_keywords_from_headings_and_tables(tmp_path, 
     assert "회의록.md" not in keyword_files
 
 
-def test_long_document_enforces_tripled_minimum_keyword_count(tmp_path, sample_settings_dict):
+def test_long_document_prefers_strong_topics_over_filling_minimum_count(tmp_path, sample_settings_dict):
     from app.core.config import Settings
 
     sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
@@ -481,10 +481,19 @@ def test_long_document_enforces_tripled_minimum_keyword_count(tmp_path, sample_s
 
     service.run_incremental(space_key="DEMO")
 
-    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_root = tmp_path / "wiki" / "global" / "knowledge" / "keywords"
     keyword_files = sorted(path.name for path in keyword_root.glob("*.md"))
 
-    assert len(keyword_files) >= 9
+    assert len(keyword_files) >= 6
+    assert "hbm.md" in keyword_files
+    assert "수율.md" in keyword_files
+    assert "패키징.md" in keyword_files
+    assert "공정.md" in keyword_files
+    assert any(name in keyword_files for name in {"공급망.md", "공급망-이슈.md"})
+    assert "장애.md" in keyword_files
+    assert "운영.md" not in keyword_files
+    assert "현황.md" not in keyword_files
+    assert "계획.md" not in keyword_files
 
 
 def test_phrase_topics_prefer_structural_meaning_bundles(tmp_path, sample_settings_dict):
@@ -514,7 +523,7 @@ def test_phrase_topics_prefer_structural_meaning_bundles(tmp_path, sample_settin
 
     service.run_incremental(space_key="DEMO")
 
-    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_root = tmp_path / "wiki" / "global" / "knowledge" / "keywords"
     keyword_files = {path.name for path in keyword_root.glob("*.md")}
 
     assert "ai-portal.md" in keyword_files
@@ -567,7 +576,7 @@ def test_existing_phrase_topic_absorbs_related_document_even_with_weak_title(tmp
     )
     second_service.run_incremental(space_key="DEMO")
 
-    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_root = tmp_path / "wiki" / "global" / "knowledge" / "keywords"
     ds_assistant = (keyword_root / "ds-assistant.md").read_text(encoding="utf-8")
 
     assert "DS Assistant 운영 개요" in ds_assistant
@@ -599,7 +608,7 @@ def test_sentence_fragments_do_not_become_topic_pages(tmp_path, sample_settings_
 
     service.run_incremental(space_key="DEMO")
 
-    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_root = tmp_path / "wiki" / "global" / "knowledge" / "keywords"
     keyword_files = {path.name for path in keyword_root.glob("*.md")}
 
     assert "ai-portal.md" in keyword_files
@@ -607,6 +616,145 @@ def test_sentence_fragments_do_not_become_topic_pages(tmp_path, sample_settings_
     assert "않고-메신저.md" not in keyword_files
     assert "상황-부탁.md" not in keyword_files
     assert "부탁-드립니다.md" not in keyword_files
+
+
+def test_generic_operational_nouns_do_not_fill_topic_pages(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100"],
+            title_overrides={"100": "주간 운영 현황"},
+            body_overrides={
+                "100": (
+                    "<h1>AI Portal 운영 점검</h1>"
+                    "<h2>AI Portal 장애 대응</h2>"
+                    "<p>AI Portal 인증 흐름과 AI Portal 운영 상태를 정리합니다.</p>"
+                    "<p>운영 현황과 점검 항목, 관련 상황은 회의 맥락으로만 반복됩니다.</p>"
+                )
+            },
+        ),
+    )
+
+    service.run_incremental(space_key="DEMO")
+
+    keyword_root = tmp_path / "wiki" / "global" / "knowledge" / "keywords"
+    keyword_files = {path.name for path in keyword_root.glob("*.md")}
+
+    assert "ai-portal.md" in keyword_files
+    assert "운영.md" not in keyword_files
+    assert "현황.md" not in keyword_files
+    assert "점검.md" not in keyword_files
+    assert "상황.md" not in keyword_files
+
+
+def test_phrase_topics_keep_meaningful_stopword_components(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100"],
+            title_overrides={"100": "LLM Wiki 아키텍처 메모"},
+            body_overrides={
+                "100": (
+                    "<h1>LLM Wiki 아키텍처</h1>"
+                    "<h2>Raw Sources</h2>"
+                    "<p>LLM Wiki workflow는 Raw Sources, index.md, log.md, synthesis를 함께 사용합니다.</p>"
+                )
+            },
+        ),
+    )
+
+    service.run_incremental(space_key="DEMO")
+
+    keyword_root = tmp_path / "wiki" / "global" / "knowledge" / "keywords"
+    keyword_files = {path.name for path in keyword_root.glob("*.md")}
+
+    assert "llm-wiki.md" in keyword_files
+    assert "wiki.md" not in keyword_files
+
+
+def test_phrase_first_selection_drops_generic_title_tokens(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100"],
+            title_overrides={"100": "LLM-Wiki - LLM을 활용하여 개인 지식저장소 구축 하기"},
+            body_overrides={
+                "100": (
+                    "<h1>LLM Wiki</h1>"
+                    "<h2>핵심 아이디어</h2>"
+                    "<p>LLM Wiki는 persistent wiki를 점진적으로 구축하고 RAG와 다른 접근을 취합니다.</p>"
+                    "<p>개인 지식저장소를 구축하는 방법을 소개하지만 '개인', '구축', '하기'는 독립 주제가 아닙니다.</p>"
+                )
+            },
+        ),
+    )
+
+    service.run_incremental(space_key="DEMO")
+
+    keyword_root = tmp_path / "wiki" / "global" / "knowledge" / "keywords"
+    keyword_files = {path.name for path in keyword_root.glob("*.md")}
+
+    assert "llm-wiki.md" in keyword_files
+    assert "개인.md" not in keyword_files
+    assert "구축.md" not in keyword_files
+    assert "하기.md" not in keyword_files
+    assert "활용하여.md" not in keyword_files
+
+
+def test_rich_article_headings_generate_multiple_meaningful_topics(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100"],
+            title_overrides={"100": "Sam Altman이 우리의 미래를 통제할지도 모른다"},
+            body_overrides={
+                "100": (
+                    "<h1>Sam Altman이 우리의 미래를 통제할지도 모른다</h1>"
+                    "<h2>OpenAI 설립 — 안전 명분과 자금 조달의 이중성</h2>"
+                    "<h2>Dario Amodei와 Anthropic 창업 — 안전 원칙의 균열</h2>"
+                    "<h2>영리 전환, 자산 구조, 개인 이해관계</h2>"
+                    "<h2>정치적 변신과 규제 로비</h2>"
+                    "<h2>AI 안전의 현재 — 약속과 현실의 간극</h2>"
+                    "<p>Sam Altman, OpenAI, Anthropic, 규제 로비, 자산 구조, AI 안전이 반복적으로 언급됩니다.</p>"
+                )
+            },
+        ),
+    )
+
+    service.run_incremental(space_key="DEMO")
+
+    keyword_root = tmp_path / "wiki" / "global" / "knowledge" / "keywords"
+    keyword_files = {path.name for path in keyword_root.glob("*.md")}
+
+    assert "sam-altman.md" in keyword_files
+    assert any(name in keyword_files for name in {"정치적-변신.md", "변신-규제.md", "규제-로비.md"})
+    assert any(name in keyword_files for name in {"안전-원칙.md", "자금-조달.md", "ai-안전.md"})
+    assert "개인.md" not in keyword_files
+    assert len(keyword_files) >= 6
 
 
 def test_page_slug_stays_stable_when_title_changes(tmp_path, sample_settings_dict):

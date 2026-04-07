@@ -9,11 +9,11 @@ def test_demo_seed_creates_lint_report_with_health_sections(tmp_path, sample_set
 
     seed_demo_content(settings)
 
-    lint_path = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "lint" / "report.md"
+    lint_path = tmp_path / "wiki" / "global" / "knowledge" / "lint" / "report.md"
     lint_text = lint_path.read_text(encoding="utf-8")
 
     assert "# Lint Report" in lint_text
-    assert "# DEMO Lint Report" not in lint_text
     assert "## Missing Summaries" in lint_text
+    assert "## Unmapped Raw Pages" in lint_text
     assert "## Orphans" in lint_text
     assert "## History Coverage" in lint_text

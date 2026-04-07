@@ -9,8 +9,8 @@ def page_target(space_key: str, slug: str) -> str:
     return f"spaces/{space_key}/pages/{slug}"
 
 
-def knowledge_target(space_key: str, kind: str, slug: str) -> str:
-    return f"spaces/{space_key}/knowledge/{knowledge_segment(kind)}/{slug}"
+def knowledge_target(kind: str, slug: str) -> str:
+    return f"knowledge/{knowledge_segment(kind)}/{slug}"
 
 
 def asset_target(space_key: str, filename: str) -> str:
@@ -25,8 +25,8 @@ def page_link(space_key: str, slug: str, label: str | None = None) -> str:
     return wiki_link(page_target(space_key, slug), label)
 
 
-def knowledge_link(space_key: str, kind: str, slug: str, label: str | None = None) -> str:
-    return wiki_link(knowledge_target(space_key, kind, slug), label)
+def knowledge_link(kind: str, slug: str, label: str | None = None) -> str:
+    return wiki_link(knowledge_target(kind, slug), label)
 
 
 def asset_embed(space_key: str, filename: str) -> str:

@@ -132,6 +132,7 @@ class TextLLMClient:
             "Rules:\n"
             "- Select only phrases that already exist in the candidate list.\n"
             "- Prefer meaningful phrase bundles such as 'AI Portal', 'AI Agent', and 'DS Assistant' over split single tokens.\n"
+            "- Reject weak standalone operational nouns such as 'operations', 'status', 'check', 'state', 'flow', 'plan', 'response', 'policy', and 'procedure' unless they are part of a stronger multi-token phrase already present in the candidate list.\n"
             "- Use the page title first. If the title is weak, rely on headings, table headers, and link text before plain body frequency.\n"
             "- Reuse an existing topic when the document clearly belongs to it, even if the exact phrase is not frequent.\n"
             "- Treat 'Samsung DS', 'DS Division', and 'Device Solutions' as the DS division.\n"
@@ -174,10 +175,10 @@ class TextLLMClient:
         except Exception:
             return text.splitlines()[0][:180]
 
-    def summarize_fact_card(self, title: str, text: str) -> str:
+    def summarize_fact_card(self, title: str, text: str, prefer_llm: bool = True) -> str:
         if not text.strip():
             return ""
-        if not self.settings.openai_api_key:
+        if not prefer_llm or not self.settings.openai_api_key:
             return self._fallback_fact_card(title, text)
         try:
             completion = self._client().chat.completions.create(
@@ -197,10 +198,11 @@ class TextLLMClient:
         topic: str,
         fact_cards: list[dict[str, str]],
         related_topics: list[str],
+        prefer_llm: bool = True,
     ) -> str:
         if not fact_cards:
             return ""
-        if not self.settings.openai_api_key:
+        if not prefer_llm or not self.settings.openai_api_key:
             return self._fallback_topic_page(space_key, topic, fact_cards, related_topics)
         payload = "\n\n".join(
             [
@@ -264,7 +266,7 @@ class TextLLMClient:
             )
             content = completion.choices[0].message.content or ""
             selected = self._parse_topic_selection(content, candidates)
-            if len(selected) >= minimum_count:
+            if selected:
                 return selected
         except Exception:
             pass
@@ -339,16 +341,6 @@ class TextLLMClient:
             selected_topics.append(topic)
             if len(selected_topics) >= minimum_count:
                 break
-
-        if len(selected_topics) < minimum_count:
-            for candidate in ordered:
-                topic = str(candidate["topic"])
-                if topic in selected_topics:
-                    continue
-                selected.append(candidate)
-                selected_topics.append(topic)
-                if len(selected_topics) >= minimum_count:
-                    break
         return selected_topics
 
     @classmethod
@@ -359,6 +351,7 @@ class TextLLMClient:
         sources = {str(item) for item in candidate.get("sources") or []}
         components = [str(item) for item in candidate.get("components") or []]
         weak_component_set = {item.lower() for item in WEAK_TOPIC_COMPONENTS}
+        headword = components[-1].lower() if components else ""
 
         structural_bonus = 0
         if "title" in sources:
@@ -378,10 +371,12 @@ class TextLLMClient:
         mixed_penalty = 0 if all_ascii or all_non_ascii else 3
         phrase_bonus = 0
         if token_count > 1:
-            if "title" in sources or "existing" in sources:
+            if headword in {"dashboard", "portal", "runbook", "wiki", "assistant", "agent", "architecture", "flow", "policy", "guide", "이슈", "런북", "대시보드", "아키텍처", "포털", "절차", "정책", "흐름", "위키", "어시스턴트", "에이전트"}:
+                phrase_bonus += 32
+            elif "title" in sources or "existing" in sources:
                 phrase_bonus += 34
             elif weak_penalty:
-                phrase_bonus -= 26
+                phrase_bonus -= 10
             else:
                 phrase_bonus += 20
                 if all_ascii or all_non_ascii:

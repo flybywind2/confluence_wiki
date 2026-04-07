@@ -64,6 +64,8 @@ def split_frontmatter(content: str) -> tuple[dict, str]:
 def render_markdown(markdown_text: str) -> str:
     def _route_for_target(target: str) -> str | None:
         parts = target.strip("/").split("/")
+        if len(parts) >= 3 and parts[0] == "knowledge":
+            return f"/knowledge/{knowledge_segment(parts[1])}/{parts[2]}"
         if len(parts) == 2:
             return f"/spaces/{parts[0]}/pages/{parts[1]}"
         if len(parts) >= 4 and parts[0] == "spaces" and parts[2] == "pages":

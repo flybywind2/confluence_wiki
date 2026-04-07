@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy import select
 
 from app.core.config import Settings, get_settings
-from app.core.knowledge import knowledge_href, knowledge_label, normalize_knowledge_kind
+from app.core.knowledge import GLOBAL_KNOWLEDGE_SPACE_KEY, knowledge_href, knowledge_label, normalize_knowledge_kind, source_space_keys
 from app.core.markdown import read_markdown_body
 from app.db.models import KnowledgeDocument, Page, Space, WikiDocument
 from app.db.session import create_session_factory
@@ -118,12 +118,19 @@ class WikiQAService:
         session = self.session_factory()
         try:
             page_query = select(Page, WikiDocument, Space).join(WikiDocument, WikiDocument.page_id == Page.id).join(Space, Space.id == Page.space_id)
-            knowledge_query = select(KnowledgeDocument, Space).join(Space, Space.id == KnowledgeDocument.space_id)
+            knowledge_query = (
+                select(KnowledgeDocument, Space)
+                .join(Space, Space.id == KnowledgeDocument.space_id)
+                .where(Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY)
+            )
             if scope == "space" and selected_space:
                 page_query = page_query.where(Space.space_key == selected_space)
-                knowledge_query = knowledge_query.where(Space.space_key == selected_space)
             page_rows = session.execute(page_query).all()
-            knowledge_rows = session.execute(knowledge_query).all()
+            knowledge_rows = [
+                (doc, space)
+                for doc, space in session.execute(knowledge_query).all()
+                if scope != "space" or not selected_space or selected_space in set(source_space_keys(doc.source_refs))
+            ]
         finally:
             session.close()
 
@@ -137,7 +144,9 @@ class WikiQAService:
                 continue
             body = read_markdown_body(markdown_path)
             normalized_kind = normalize_knowledge_kind(doc.kind)
-            hint = index_hints.get((space.space_key, normalized_kind, doc.slug), "")
+            if normalized_kind == "lint":
+                continue
+            hint = index_hints.get(("global", normalized_kind, doc.slug), "")
             score = self._score_candidate(
                 tokens=question_tokens,
                 title=doc.title,
@@ -147,6 +156,8 @@ class WikiQAService:
                 hint=hint,
                 source_refs=doc.source_refs or "",
             )
+            if normalized_kind == "analysis" and any(token in {"analysis", "분석", "문서"} for token in question_tokens):
+                score += 100
             if question_tokens and score == 0:
                 continue
             ranked.append(
@@ -154,11 +165,11 @@ class WikiQAService:
                     score + 50,
                     {
                         "title": doc.title,
-                        "space_key": space.space_key,
+                        "space_key": ",".join(source_space_keys(doc.source_refs)) or "global",
                         "slug": doc.slug,
                         "kind": normalized_kind,
-                        "href": knowledge_href(space.space_key, normalized_kind, doc.slug),
-                        "source_url": knowledge_href(space.space_key, normalized_kind, doc.slug),
+                        "href": knowledge_href(normalized_kind, doc.slug),
+                        "source_url": knowledge_href(normalized_kind, doc.slug),
                         "excerpt": self._excerpt(body, question_tokens),
                     },
                 )
@@ -226,11 +237,11 @@ class WikiQAService:
                     fallback_sources.append(
                         {
                             "title": doc.title,
-                            "space_key": space.space_key,
+                            "space_key": ",".join(source_space_keys(doc.source_refs)) or "global",
                             "slug": doc.slug,
                             "kind": kind,
-                            "href": knowledge_href(space.space_key, kind, doc.slug),
-                            "source_url": knowledge_href(space.space_key, kind, doc.slug),
+                            "href": knowledge_href(kind, doc.slug),
+                            "source_url": knowledge_href(kind, doc.slug),
                             "excerpt": self._excerpt(body, []),
                         }
                     )
@@ -265,6 +276,9 @@ class WikiQAService:
                     if len(parts) >= 4 and parts[0] == "spaces" and parts[2] == "pages":
                         hints[(parts[1], "page", parts[3])] = line
                         continue
+                    if len(parts) >= 3 and parts[0] == "knowledge":
+                        hints[("global", normalize_knowledge_kind(parts[1]), parts[2])] = line
+                        continue
                     if len(parts) >= 5 and parts[0] == "spaces" and parts[2] == "knowledge":
                         hints[(parts[1], normalize_knowledge_kind(parts[3]), parts[4])] = line
                         continue
@@ -273,7 +287,9 @@ class WikiQAService:
                     continue
                 href = link_match.group("href").strip()
                 parts = href.strip("/").split("/")
-                if len(parts) >= 5 and parts[0] == "spaces" and parts[2] == "knowledge":
+                if len(parts) >= 3 and parts[0] == "knowledge":
+                    hints[("global", normalize_knowledge_kind(parts[1]), parts[2])] = line
+                elif len(parts) >= 5 and parts[0] == "spaces" and parts[2] == "knowledge":
                     hints[(parts[1], normalize_knowledge_kind(parts[3]), parts[4])] = line
                 elif len(parts) >= 4 and parts[0] == "spaces" and parts[2] == "pages":
                     hints[(parts[1], "page", parts[3])] = line
@@ -286,78 +302,8 @@ class WikiQAService:
             if space is None:
                 return
 
-            self.lint_service.rebuild_space_with_session(session, space_key)
-            session.flush()
-
-            page_rows = session.execute(
-                select(Page, WikiDocument)
-                .join(WikiDocument, WikiDocument.page_id == Page.id)
-                .where(Page.space_id == space.id)
-            ).all()
-            knowledge_rows = session.scalars(
-                select(KnowledgeDocument).where(KnowledgeDocument.space_id == space.id)
-            ).all()
-
-            documents = [
-                {
-                    "title": page.title,
-                    "slug": page.slug,
-                    "summary": wiki_document.summary or "",
-                    "href": f"/spaces/{space_key}/pages/{page.slug}",
-                }
-                for page, wiki_document in page_rows
-            ]
-            knowledge_documents = [
-                {
-                    "title": doc.title,
-                    "slug": doc.slug,
-                    "kind": doc.kind,
-                    "summary": doc.summary or "",
-                    "href": knowledge_href(space_key, doc.kind, doc.slug),
-                }
-                for doc in knowledge_rows
-            ]
-
-            build_space_index(self.settings.wiki_root, space_key, documents, knowledge_documents)
-            build_space_synthesis(
-                self.settings.wiki_root,
-                space_key,
-                documents,
-                generated_at=datetime.now(),
-                recent_log_entries=read_space_log_excerpt(self.settings.wiki_root, space_key),
-            )
-
-            grouped_documents: dict[str, list[dict[str, str]]] = {}
-            for listed_space in session.scalars(select(Space).order_by(Space.space_key)).all():
-                listed_page_rows = session.execute(
-                    select(Page, WikiDocument)
-                    .join(WikiDocument, WikiDocument.page_id == Page.id)
-                    .where(Page.space_id == listed_space.id)
-                ).all()
-                listed_knowledge_rows = session.scalars(
-                    select(KnowledgeDocument).where(KnowledgeDocument.space_id == listed_space.id)
-                ).all()
-                grouped_documents[listed_space.space_key] = [
-                    *[
-                        {
-                            "title": page.title,
-                            "slug": page.slug,
-                            "summary": wiki_document.summary or "",
-                            "href": f"/spaces/{listed_space.space_key}/pages/{page.slug}",
-                        }
-                        for page, wiki_document in listed_page_rows
-                    ],
-                    *[
-                        {
-                            "title": doc.title,
-                            "slug": doc.slug,
-                            "summary": doc.summary or "",
-                            "href": knowledge_href(listed_space.space_key, doc.kind, doc.slug),
-                        }
-                        for doc in listed_knowledge_rows
-                    ],
-                ]
-            build_global_index(self.settings.wiki_root, grouped_documents)
+            self.lint_service.rebuild_global_with_session(session)
+            self.knowledge_service._rebuild_indexes_for_space(session, space)
             session.commit()
         except Exception:
             session.rollback()

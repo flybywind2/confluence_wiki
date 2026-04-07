@@ -15,16 +15,16 @@
   Confluence 원문 페이지를 동기화한 최신 markdown.
 - `spaces/<SPACE>/history/<slug>/v0001.md`
   페이지 버전별 snapshot.
-- `spaces/<SPACE>/knowledge/entities/`
-  원문 페이지를 기반으로 정리한 entity 문서.
-- `spaces/<SPACE>/knowledge/keywords/`
-  raw page 본문에서 기계적으로 추출한 주요 키워드 문서.
-- `spaces/<SPACE>/knowledge/analyses/`
+- `global/knowledge/keywords/`
+  여러 space의 raw page를 통합해 만든 대표 주제 문서.
+- `global/knowledge/queries/`
+  사용자가 입력한 검색 키워드로 raw page 전체를 탐색해 만든 query 문서.
+- `global/knowledge/analyses/`
   질문 결과, 비교표, 해석, 후속 탐구 결과를 저장한 분석 문서.
-- `spaces/<SPACE>/knowledge/lint/report.md`
-  위키 health-check 결과.
+- `global/knowledge/lint/report.md`
+  전체 위키 health-check 결과.
 - `spaces/<SPACE>/index.md`
-  페이지와 지식 문서의 카탈로그.
+  해당 space의 raw page와 global knowledge 문서를 source 기준으로 필터링한 카탈로그.
 - `spaces/<SPACE>/log.md`
   append-only 작업 로그.
 - `spaces/<SPACE>/synthesis.md`
@@ -42,15 +42,15 @@
 
 1. mirror에서 source를 읽는다.
 2. 최신 page markdown과 version snapshot을 쓴다.
-3. 관련 entity/keyword 문서를 갱신한다.
+3. global keyword/query/analysis/lint 문서를 갱신한다.
 4. `index.md`, `synthesis.md`, `log.md`, `graph.json` 을 갱신한다.
 5. 필요 시 `lint/report.md` 를 다시 생성한다.
 
 ## Query Workflow
 
-1. 먼저 `index.md` 를 읽어 후보 페이지를 찾는다.
+1. raw page 전체와 global knowledge 문서를 함께 후보로 본다.
 2. 관련 page/knowledge 문서를 읽고 답을 합성한다.
-3. 답변이 재사용 가치가 있으면 `knowledge/analyses/` 아래 분석 문서로 저장한다.
+3. 답변이 재사용 가치가 있으면 `global/knowledge/analyses/` 아래 분석 문서로 저장한다.
 4. 저장 시 `index.md`, `log.md`, `lint/report.md` 를 함께 갱신한다.
 
 ## Lint Workflow

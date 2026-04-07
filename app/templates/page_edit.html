@@ -5,8 +5,13 @@
   <nav class="page-breadcrumbs" aria-label="breadcrumb">
     <a href="/">전체</a>
     <span>/</span>
+    {% if selected_space and selected_space != 'all' %}
     <a href="/spaces/{{ selected_space }}">{{ selected_space_name or selected_space }}</a>
     <span>/</span>
+    {% else %}
+    <a href="/">통합 지식</a>
+    <span>/</span>
+    {% endif %}
     <a href="{{ cancel_href }}">{{ page_title }}</a>
     <span>/</span>
     <span>편집</span>
@@ -24,6 +29,7 @@
   </div>
   {% endif %}
   <form class="editor-form" action="{{ form_action }}" method="post">
+    <input type="hidden" name="selected_space" value="{{ selected_space or '' }}" />
     <textarea class="editor-textarea" name="body" rows="24" spellcheck="false">{{ body_markdown }}</textarea>
     <div class="editor-actions">
       <a class="source-link" href="{{ cancel_href }}">취소</a>

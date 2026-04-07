@@ -14,8 +14,8 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 - 문서별 history snapshot 저장
 - append-only `log.md` 운영 로그
 - space별 `synthesis.md` 누적 요약 페이지
-- `knowledge/entities`, `knowledge/keywords`, `knowledge/analyses`, `knowledge/lint` 지식 레이어
-- 기본 UI는 `keyword`, `analysis`, `lint`, `synthesis` 중심의 knowledge-first 노출
+- global `knowledge/keywords`, `knowledge/queries`, `knowledge/analyses`, `knowledge/lint` 지식 레이어
+- 기본 UI는 `keyword`, `query`, `analysis`, `lint`, `synthesis` 중심의 knowledge-first 노출
 - raw Confluence page는 내부 근거와 direct URL용으로 유지
 - 복잡한 표는 HTML fallback
 - 이미지 로컬 저장 + VLM 기반 한국어 설명
@@ -38,7 +38,18 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 - wiki: markdown 파일 기반 영속 위키
 - schema: [AGENTS.md](./AGENTS.md)
 
-질문 응답도 일회성 채팅으로 끝내지 않고 `knowledge/analyses/` 아래 markdown로 저장해 다시 위키의 일부로 관리합니다. 사용자가 기본 UI에서 보는 것은 raw page 목록이 아니라 keyword 중심 knowledge 문서 계층입니다.
+질문 응답도 일회성 채팅으로 끝내지 않고 `global/knowledge/analyses/` 아래 markdown로 저장해 다시 위키의 일부로 관리합니다. 사용자가 기본 UI에서 보는 것은 raw page 목록이 아니라 전 space를 통합한 keyword/query 중심 knowledge 문서 계층입니다.
+
+`QUERY / INGEST / LINT` 운영 권장안은 아래와 같습니다.
+
+- `INGEST`
+  - bootstrap / incremental sync는 raw source를 갱신하고, 이후 global knowledge 문서와 graph를 재생성합니다.
+- `QUERY`
+  - 사용자가 입력한 키워드는 raw page 전체를 검색해 별도 `query` 문서로 저장합니다.
+  - query 결과는 자동 keyword 문서와 분리되어 history와 링크 추적이 쉽습니다.
+- `LINT`
+  - 경량 lint는 매 sync 뒤 자동 실행하는 것이 적절합니다.
+  - 더 무거운 semantic lint는 하루 1회 외부 스케줄러로 별도 실행하는 것이 적절합니다.
 
 저장되는 markdown는 웹 UI 전용 포맷이 아니라 Obsidian vault에서도 바로 탐색할 수 있는 형식으로 유지합니다.
 
@@ -59,6 +70,14 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 - `CACHE_ROOT`
 - `LLM_BASE_URL`, `LLM_MODEL`
 - `VLM_BASE_URL`, `VLM_MODEL`
+
+로컬 Ollama를 쓸 때는 아래처럼 설정하면 됩니다.
+
+```env
+OPENAI_API_KEY=ollama
+LLM_BASE_URL=http://127.0.0.1:11434/v1
+LLM_MODEL=VladimirGav/gemma4-26b-16GB-VRAM:latest
+```
 
 ## 설치
 

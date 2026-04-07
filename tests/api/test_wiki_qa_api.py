@@ -20,7 +20,7 @@ def test_wiki_qa_api_answers_within_selected_space(tmp_path, sample_settings_dic
     assert response.status_code == 200
     body = response.json()
     assert body["scope"] == "space"
-    assert all(source["space_key"] == "DEMO" for source in body["sources"])
+    assert all("DEMO" in source["space_key"] for source in body["sources"])
 
 
 def test_wiki_qa_api_can_answer_across_global_wiki(tmp_path, sample_settings_dict):
@@ -38,7 +38,7 @@ def test_wiki_qa_api_can_answer_across_global_wiki(tmp_path, sample_settings_dic
     assert response.status_code == 200
     body = response.json()
     assert body["scope"] == "global"
-    assert any(source["space_key"] == "ARCH" for source in body["sources"])
+    assert any("ARCH" in source["space_key"] for source in body["sources"])
 
 
 def test_wiki_qa_api_rejects_space_scope_without_specific_space(tmp_path, sample_settings_dict):
@@ -84,7 +84,7 @@ def test_wiki_qa_api_can_save_answer_as_analysis_page(tmp_path, sample_settings_
 
     assert save_response.status_code == 200
     saved = save_response.json()
-    assert saved["href"].startswith("/spaces/DEMO/knowledge/analyses/")
+    assert saved["href"].startswith("/knowledge/analyses/")
 
     analysis_page = client.get(saved["href"])
     assert analysis_page.status_code == 200

@@ -182,18 +182,18 @@ def test_graph_page_renders_reset_button_and_space_name(tmp_path, sample_setting
     assert "Demo Showcase" in response.text
 
 
-def test_knowledge_route_renders_entity_page(tmp_path, sample_settings_dict):
+def test_knowledge_route_renders_global_keyword_page(tmp_path, sample_settings_dict):
     sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
     sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
     settings = Settings.model_validate(sample_settings_dict)
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
-    response = client.get("/spaces/DEMO/knowledge/entities/demo-home-9001")
+    response = client.get("/knowledge/keywords/운영-대시보드")
 
     assert response.status_code == 200
-    assert "지식 문서" in response.text
-    assert "Confluence Wiki Demo 홈" in response.text
+    assert "키워드 문서" in response.text
+    assert "운영 대시보드" in response.text
 
 
 def test_knowledge_page_shows_edit_link_and_raw_page_does_not(tmp_path, sample_settings_dict):
@@ -204,13 +204,42 @@ def test_knowledge_page_shows_edit_link_and_raw_page_does_not(tmp_path, sample_s
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
 
-    knowledge_response = client.get("/spaces/DEMO/knowledge/keywords/운영-대시보드")
+    knowledge_response = client.get("/knowledge/keywords/운영-대시보드")
     assert knowledge_response.status_code == 200
-    assert '/spaces/DEMO/knowledge/keywords/운영-대시보드/edit' in knowledge_response.text
+    assert '/knowledge/keywords/운영-대시보드/edit' in knowledge_response.text
 
     raw_response = client.get("/spaces/DEMO/pages/demo-home-9001")
     assert raw_response.status_code == 200
     assert '/spaces/DEMO/pages/demo-home-9001/edit' not in raw_response.text
+
+
+def test_global_keyword_page_shows_clickable_original_confluence_link(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    response = client.get("/knowledge/keywords/운영-대시보드")
+
+    assert response.status_code == 200
+    assert 'href="https://prod.example.com/confluence/pages/viewpage.action?pageId=9002"' in response.text
+    assert ">Confluence 원문<" in response.text
+
+
+def test_keyword_knowledge_page_shows_clickable_original_confluence_links(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    response = client.get("/knowledge/keywords/운영-대시보드")
+
+    assert response.status_code == 200
+    assert 'href="https://prod.example.com/confluence/pages/viewpage.action?pageId=9001"' in response.text
+    assert 'href="https://prod.example.com/confluence/pages/viewpage.action?pageId=9002"' in response.text
+    assert response.text.count(">Confluence 원문<") >= 2
 
 
 def test_knowledge_edit_form_renders_markdown_body(tmp_path, sample_settings_dict):
@@ -220,7 +249,7 @@ def test_knowledge_edit_form_renders_markdown_body(tmp_path, sample_settings_dic
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
-    response = client.get("/spaces/DEMO/knowledge/keywords/운영-대시보드/edit")
+    response = client.get("/knowledge/keywords/운영-대시보드/edit")
 
     assert response.status_code == 200
     assert "<textarea" in response.text
@@ -237,20 +266,37 @@ def test_knowledge_edit_save_updates_rendered_content(tmp_path, sample_settings_
     new_body = "# 운영 대시보드\n\n수정된 본문입니다.\n\n- 새 메모"
 
     response = client.post(
-        "/spaces/DEMO/knowledge/keywords/운영-대시보드/edit",
+        "/knowledge/keywords/운영-대시보드/edit",
         data={"body": new_body},
         follow_redirects=False,
     )
 
     assert response.status_code == 303
-    assert response.headers["location"].endswith("/spaces/DEMO/knowledge/keywords/%EC%9A%B4%EC%98%81-%EB%8C%80%EC%8B%9C%EB%B3%B4%EB%93%9C")
+    assert response.headers["location"].endswith("/knowledge/keywords/%EC%9A%B4%EC%98%81-%EB%8C%80%EC%8B%9C%EB%B3%B4%EB%93%9C")
 
-    rendered = client.get("/spaces/DEMO/knowledge/keywords/운영-대시보드")
+    rendered = client.get("/knowledge/keywords/운영-대시보드")
     assert rendered.status_code == 200
     assert "수정된 본문입니다." in rendered.text
 
-    keyword_file = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords" / "운영-대시보드.md"
+    keyword_file = tmp_path / "wiki" / "global" / "knowledge" / "keywords" / "운영-대시보드.md"
     assert "수정된 본문입니다." in keyword_file.read_text(encoding="utf-8")
+
+
+def test_query_page_renders_under_canonical_query_route(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    build_response = client.post("/api/wiki-from-query", json={"query": "운영 대시보드"})
+    assert build_response.status_code == 200
+    href = build_response.json()["href"]
+
+    response = client.get(href)
+    assert response.status_code == 200
+    assert "검색 위키" in response.text
+    assert "운영 대시보드" in response.text
 
 
 def test_history_route_backfills_current_version_when_snapshot_path_is_missing(tmp_path, sample_settings_dict):

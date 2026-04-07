@@ -26,7 +26,7 @@ def test_extract_wiki_links_ignores_embeds_and_parses_obsidian_targets():
         [
             "[[spaces/DEMO/pages/root-page-100|Root Page]]",
             "![[spaces/DEMO/assets/diagram.png]]",
-            "[[spaces/DEMO/knowledge/keywords/운영|운영]]",
+            "[[knowledge/keywords/운영|운영]]",
         ]
     )
 
@@ -34,5 +34,5 @@ def test_extract_wiki_links_ignores_embeds_and_parses_obsidian_targets():
 
     assert links == [
         "spaces/DEMO/pages/root-page-100",
-        "spaces/DEMO/knowledge/keywords/운영",
+        "knowledge/keywords/운영",
     ]

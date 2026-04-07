@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +11,15 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import or_, select
 
-from app.core.knowledge import knowledge_href, knowledge_label, knowledge_segment, normalize_knowledge_kind
+from app.core.knowledge import (
+    GLOBAL_KNOWLEDGE_SPACE_KEY,
+    knowledge_href,
+    knowledge_label,
+    knowledge_segment,
+    legacy_knowledge_href,
+    normalize_knowledge_kind,
+    source_space_keys,
+)
 from app.core.markdown import read_markdown_body, read_markdown_document, render_markdown
 from app.db.models import KnowledgeDocument, Page, PageVersion, Space, WikiDocument
 from app.graph.builder import build_graph_payload, build_knowledge_graph_payload
@@ -20,6 +29,7 @@ from app.services.sync_service import SyncService
 from app.services.wiki_qa import WikiQAService
 
 router = APIRouter()
+_RAW_PAGE_REF_RE = re.compile(r"(?:/spaces/|spaces/)(?P<space_key>[^/\]]+)/pages/(?P<slug>[^|\]\s]+)")
 
 
 def _templates(request: Request) -> Jinja2Templates:
@@ -57,24 +67,74 @@ def _space_name_by_key(spaces: list[Space]) -> dict[str, str]:
     return {space.space_key: _space_display_name(space) for space in spaces}
 
 
-def _display_document_title(space_key: str, title: str | None) -> str:
+def _visible_spaces(session) -> list[Space]:
+    return session.scalars(
+        select(Space).where(Space.space_key != GLOBAL_KNOWLEDGE_SPACE_KEY).order_by(Space.space_key)
+    ).all()
+
+
+def _display_document_title(space_key: str | None, title: str | None) -> str:
     normalized = str(title or "").strip()
-    prefix = f"{space_key} "
+    prefix = f"{space_key} " if space_key else ""
     if normalized.startswith(prefix):
         return normalized[len(prefix) :]
     return normalized
 
 
 def _is_editable_knowledge_kind(kind: str) -> bool:
-    return normalize_knowledge_kind(kind) in {"keyword", "analysis", "lint"}
+    return normalize_knowledge_kind(kind) in {"keyword", "analysis", "query", "lint"}
 
 
 def _history_snapshot_path(request: Request, space_key: str, slug: str, version_number: int) -> Path:
     return _settings(request).wiki_root / "spaces" / space_key / "history" / slug / f"v{version_number:04d}.md"
 
 
+def _knowledge_prod_url(session, source_refs: str | None) -> str | None:
+    source_pages = _knowledge_source_pages(session, source_refs)
+    if len(source_pages) != 1:
+        return None
+    return source_pages[0]["prod_url"] or None
+
+
+def _knowledge_source_pages(session, source_refs: str | None) -> list[dict[str, str]]:
+    if not source_refs:
+        return []
+    raw_page_refs: list[tuple[str, str]] = []
+    for match in _RAW_PAGE_REF_RE.finditer(source_refs):
+        ref = ((match.group("space_key") or "").strip(), (match.group("slug") or "").strip())
+        if not ref[0] or not ref[1] or ref in raw_page_refs:
+            continue
+        raw_page_refs.append(ref)
+    if not raw_page_refs:
+        return []
+    rows = session.execute(
+        select(Page.slug, Page.title, Page.prod_url, Space.space_key)
+        .join(Space, Space.id == Page.space_id)
+    ).all()
+    by_ref = {
+        (space_key_value, slug): {"slug": slug, "title": title, "prod_url": prod_url or "", "space_key": space_key_value}
+        for slug, title, prod_url, space_key_value in rows
+    }
+    return [by_ref[ref] for ref in raw_page_refs if ref in by_ref]
+
+
+def _document_source_space_keys(doc: KnowledgeDocument) -> list[str]:
+    return source_space_keys(doc.source_refs)
+
+
+def _space_filter_matches(doc: KnowledgeDocument, selected_space: str | None) -> bool:
+    if not selected_space or selected_space == "all":
+        return True
+    return selected_space in set(_document_source_space_keys(doc))
+
+
+def _space_names_for_doc(doc: KnowledgeDocument, space_name_by_key: dict[str, str]) -> list[str]:
+    names = [space_name_by_key.get(key, key) for key in _document_source_space_keys(doc)]
+    return names or ["통합"]
+
+
 def _edit_notice(page_kind: str) -> str | None:
-    if page_kind in {"keyword", "lint", "synthesis"}:
+    if page_kind in {"keyword", "query", "lint", "synthesis"}:
         return "이 문서는 다음 동기화 또는 재생성 작업에서 다시 덮어써질 수 있습니다."
     return None
 
@@ -94,11 +154,11 @@ def _page_result_item(page: Page, space_key: str, space_name: str) -> dict:
 
 def _knowledge_result_item(doc: KnowledgeDocument, space_key: str, space_name: str) -> dict:
     return {
-        "title": _display_document_title(space_key, doc.title),
+        "title": _display_document_title(None, doc.title),
         "slug": doc.slug,
         "space_key": space_key,
         "space_name": space_name,
-        "href": knowledge_href(space_key, doc.kind, doc.slug),
+        "href": knowledge_href(doc.kind, doc.slug),
         "updated_at_label": str(doc.updated_at),
         "kind_label": knowledge_label(doc.kind),
         "sort_value": doc.updated_at.isoformat(),
@@ -106,7 +166,7 @@ def _knowledge_result_item(doc: KnowledgeDocument, space_key: str, space_name: s
 
 
 def _is_user_visible_knowledge(doc: KnowledgeDocument) -> bool:
-    return normalize_knowledge_kind(doc.kind) in {"keyword", "analysis", "lint"}
+    return normalize_knowledge_kind(doc.kind) in {"keyword", "analysis", "query", "lint"}
 
 
 def _parse_recent_days(value: str | None) -> int | None:
@@ -137,7 +197,11 @@ def _load_graph_payload(request: Request, selected_space: str | None = None, vie
         if not selected_space:
             return payload
         if view == "knowledge":
-            allowed_ids = {node["id"] for node in payload["nodes"] if node.get("space_key") == selected_space}
+            allowed_ids = {
+                node["id"]
+                for node in payload["nodes"]
+                if selected_space in set(node.get("source_spaces") or [node.get("space_key")])
+            }
             return {
                 "nodes": [node for node in payload["nodes"] if node["id"] in allowed_ids],
                 "edges": [
@@ -151,7 +215,11 @@ def _load_graph_payload(request: Request, selected_space: str | None = None, vie
     session = _session_factory(request)()
     try:
         if view == "knowledge":
-            knowledge_rows = session.execute(select(KnowledgeDocument, Space).join(Space, Space.id == KnowledgeDocument.space_id)).all()
+            knowledge_rows = session.execute(
+                select(KnowledgeDocument, Space).join(Space, Space.id == KnowledgeDocument.space_id).where(
+                    Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY
+                )
+            ).all()
             page_rows = session.execute(select(Page, WikiDocument, Space).join(WikiDocument, WikiDocument.page_id == Page.id).join(Space, Space.id == Page.space_id)).all()
             knowledge_documents = [
                 {
@@ -160,8 +228,9 @@ def _load_graph_payload(request: Request, selected_space: str | None = None, vie
                     "space_key": space.space_key,
                     "kind": doc.kind,
                     "summary": doc.summary or "",
-                    "href": knowledge_href(space.space_key, doc.kind, doc.slug),
+                    "href": knowledge_href(doc.kind, doc.slug),
                     "source_refs": doc.source_refs or "",
+                    "source_spaces": _document_source_space_keys(doc),
                 }
                 for doc, space in knowledge_rows
             ]
@@ -192,17 +261,22 @@ async def index(
 ) -> HTMLResponse:
     session = _session_factory(request)()
     try:
-        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
-        knowledge_query = select(KnowledgeDocument, Space).join(Space, Space.id == KnowledgeDocument.space_id)
-        if space and space != "all":
-            knowledge_query = knowledge_query.where(Space.space_key == space)
+        knowledge_query = (
+            select(KnowledgeDocument, Space)
+            .join(Space, Space.id == KnowledgeDocument.space_id)
+            .where(Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY)
+        )
         knowledge_rows = session.execute(knowledge_query).all()
         recent_days = _parse_recent_days(recent)
         pages = [
-            _knowledge_result_item(doc, doc_space.space_key, _space_display_name(doc_space))
+            {
+                **_knowledge_result_item(doc, "global", ", ".join(_space_names_for_doc(doc, space_name_by_key))),
+                "source_space_names": _space_names_for_doc(doc, space_name_by_key),
+            }
             for doc, doc_space in knowledge_rows
-            if _is_user_visible_knowledge(doc) and _matches_filters(doc, kind, recent_days)
+            if _is_user_visible_knowledge(doc) and _matches_filters(doc, kind, recent_days) and _space_filter_matches(doc, space)
         ]
         pages.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
         pages = pages[:20]
@@ -239,30 +313,39 @@ async def space_index(
     return await index(request, space=space_key, kind=kind, recent=recent)
 
 
-@router.get("/spaces/{space_key}/knowledge/{kind}/{slug}", response_class=HTMLResponse)
-async def knowledge_view(request: Request, space_key: str, kind: str, slug: str) -> HTMLResponse:
+@router.get("/knowledge/{kind}/{slug}", response_class=HTMLResponse)
+async def knowledge_view(request: Request, kind: str, slug: str, space: str | None = Query(default=None)) -> HTMLResponse:
     session = _session_factory(request)()
     try:
         normalized_kind = normalize_knowledge_kind(kind)
         doc = session.scalar(
             select(KnowledgeDocument)
             .join(Space, Space.id == KnowledgeDocument.space_id)
-            .where(Space.space_key == space_key, KnowledgeDocument.kind == normalized_kind, KnowledgeDocument.slug == slug)
+            .where(Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY, KnowledgeDocument.kind == normalized_kind, KnowledgeDocument.slug == slug)
         )
+        if doc is None:
+            doc = session.scalar(
+                select(KnowledgeDocument).where(
+                    KnowledgeDocument.kind == normalized_kind,
+                    KnowledgeDocument.slug == slug,
+                )
+            )
         if doc is None:
             raise HTTPException(status_code=404, detail="Knowledge page not found")
         markdown_path = _settings(request).wiki_root / doc.markdown_path
         body_html = render_markdown(read_markdown_body(markdown_path))
-        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
-        display_title = _display_document_title(space_key, doc.title)
+        display_title = _display_document_title(None, doc.title)
+        doc_space_names = _space_names_for_doc(doc, space_name_by_key)
         page_obj = SimpleNamespace(
             title=display_title,
-            prod_url=None,
+            prod_url=_knowledge_prod_url(session, doc.source_refs),
             updated_at_remote=doc.updated_at,
             current_version=None,
             slug=doc.slug,
         )
+        source_links = _knowledge_source_pages(session, doc.source_refs)
         return _templates(request).TemplateResponse(
             request,
             "page.html",
@@ -270,11 +353,12 @@ async def knowledge_view(request: Request, space_key: str, kind: str, slug: str)
                 "request": request,
                 "spaces": spaces,
                 "space_name_by_key": space_name_by_key,
-                "selected_space": space_key,
-                "selected_space_name": space_name_by_key.get(space_key, space_key),
+                "selected_space": space or "all",
+                "selected_space_name": space_name_by_key.get(space or "", space or "전체 Space") if space and space != "all" else "전체 Space",
                 "page": page_obj,
-                "page_space_key": space_key,
-                "page_space_name": space_name_by_key.get(space_key, space_key),
+                "page_space_key": "global",
+                "page_space_name": "통합 지식",
+                "knowledge_source_spaces": doc_space_names,
                 "body_html": body_html,
                 "page_kind": "knowledge",
                 "page_badge": knowledge_label(normalized_kind),
@@ -282,12 +366,18 @@ async def knowledge_view(request: Request, space_key: str, kind: str, slug: str)
                 "history_href": None,
                 "history_notice": None,
                 "current_page_href": None,
-                "edit_href": f"/spaces/{space_key}/knowledge/{knowledge_segment(normalized_kind)}/{slug}/edit" if _is_editable_knowledge_kind(normalized_kind) else None,
+                "edit_href": f"/knowledge/{knowledge_segment(normalized_kind)}/{slug}/edit" if _is_editable_knowledge_kind(normalized_kind) else None,
+                "source_links": source_links,
                 "meta_description": _meta_description(doc.summary or display_title),
             },
         )
     finally:
         session.close()
+
+
+@router.get("/spaces/{space_key}/knowledge/{kind}/{slug}", response_class=HTMLResponse)
+async def knowledge_view_legacy(space_key: str, kind: str, slug: str) -> RedirectResponse:
+    return RedirectResponse(url=knowledge_href(kind, slug), status_code=307)
 
 
 @router.get("/spaces/{space_key}/synthesis", response_class=HTMLResponse)
@@ -298,7 +388,7 @@ async def synthesis_view(request: Request, space_key: str) -> HTMLResponse:
         if not synthesis_path.exists():
             raise HTTPException(status_code=404, detail="Synthesis not found")
         body_html = render_markdown(read_markdown_body(synthesis_path))
-        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
         return _templates(request).TemplateResponse(
             request,
@@ -337,7 +427,7 @@ async def page_history(request: Request, space_key: str, slug: str) -> HTMLRespo
         versions = session.scalars(
             select(PageVersion).where(PageVersion.page_id == page.id).order_by(PageVersion.version_number.desc())
         ).all()
-        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
         return _templates(request).TemplateResponse(
             request,
@@ -397,7 +487,7 @@ async def page_history_version(request: Request, space_key: str, slug: str, vers
                 history_notice = f"{history_notice} · snapshot 없음"
         if markdown_path is not None and markdown_path.exists():
             body_html = render_markdown(read_markdown_body(markdown_path))
-        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
         return _templates(request).TemplateResponse(
             request,
@@ -435,7 +525,7 @@ async def page_view(request: Request, space_key: str, slug: str) -> HTMLResponse
         page, wiki_document = row
         markdown_path = _settings(request).wiki_root / wiki_document.markdown_path
         body_html = render_markdown(read_markdown_body(markdown_path))
-        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
         versions = session.scalars(
             select(PageVersion).where(PageVersion.page_id == page.id).order_by(PageVersion.version_number.desc())
@@ -476,13 +566,15 @@ async def search(
 ) -> HTMLResponse:
     session = _session_factory(request)()
     try:
-        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
         results = []
         if q:
-            knowledge_query = select(KnowledgeDocument, Space).join(Space)
-            if space and space != "all":
-                knowledge_query = knowledge_query.where(Space.space_key == space)
+            knowledge_query = (
+                select(KnowledgeDocument, Space)
+                .join(Space)
+                .where(Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY)
+            )
             knowledge_query = knowledge_query.where(
                 or_(
                     KnowledgeDocument.title.ilike(f"%{q}%"),
@@ -493,9 +585,12 @@ async def search(
             knowledge_rows = session.execute(knowledge_query.limit(50)).all()
             recent_days = _parse_recent_days(recent)
             results = [
-                _knowledge_result_item(doc, doc_space.space_key, _space_display_name(doc_space))
+                {
+                    **_knowledge_result_item(doc, "global", ", ".join(_space_names_for_doc(doc, space_name_by_key))),
+                    "source_space_names": _space_names_for_doc(doc, space_name_by_key),
+                }
                 for doc, doc_space in knowledge_rows
-                if _is_user_visible_knowledge(doc) and _matches_filters(doc, kind, recent_days)
+                if _is_user_visible_knowledge(doc) and _matches_filters(doc, kind, recent_days) and _space_filter_matches(doc, space)
             ]
             results.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
         return _templates(request).TemplateResponse(
@@ -526,7 +621,7 @@ async def search(
 async def graph_page(request: Request, space: str | None = None, view: str = Query(default="knowledge")) -> HTMLResponse:
     session = _session_factory(request)()
     try:
-        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
         return _templates(request).TemplateResponse(
             request,
@@ -551,7 +646,7 @@ async def graph_page(request: Request, space: str | None = None, view: str = Que
 async def api_spaces(request: Request) -> list[dict[str, str]]:
     session = _session_factory(request)()
     try:
-        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        spaces = _visible_spaces(session)
         return [{"space_key": space.space_key, "name": space.name or space.space_key} for space in spaces]
     finally:
         session.close()
@@ -563,9 +658,11 @@ async def api_search(request: Request, q: str = Query(default=""), space: str | 
     try:
         if not q:
             return []
-        knowledge_query = select(KnowledgeDocument, Space).join(Space)
-        if space and space != "all":
-            knowledge_query = knowledge_query.where(Space.space_key == space)
+        knowledge_query = (
+            select(KnowledgeDocument, Space)
+            .join(Space)
+            .where(Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY)
+        )
         knowledge_query = knowledge_query.where(
             or_(
                 KnowledgeDocument.title.ilike(f"%{q}%"),
@@ -575,17 +672,22 @@ async def api_search(request: Request, q: str = Query(default=""), space: str | 
         )
         knowledge_rows = session.execute(knowledge_query.limit(50)).all()
         results = [
-            {"title": doc.title, "space_key": doc_space.space_key, "slug": doc.slug, "href": knowledge_href(doc_space.space_key, doc.kind, doc.slug)}
+            {
+                "title": doc.title,
+                "space_key": ",".join(_document_source_space_keys(doc)),
+                "slug": doc.slug,
+                "href": knowledge_href(doc.kind, doc.slug),
+            }
             for doc, doc_space in knowledge_rows
-            if _is_user_visible_knowledge(doc)
+            if _is_user_visible_knowledge(doc) and _space_filter_matches(doc, space)
         ]
         return results
     finally:
         session.close()
 
 
-@router.get("/spaces/{space_key}/knowledge/{kind}/{slug}/edit", response_class=HTMLResponse)
-async def knowledge_edit_form(request: Request, space_key: str, kind: str, slug: str) -> HTMLResponse:
+@router.get("/knowledge/{kind}/{slug}/edit", response_class=HTMLResponse)
+async def knowledge_edit_form(request: Request, kind: str, slug: str, space: str | None = Query(default=None)) -> HTMLResponse:
     session = _session_factory(request)()
     try:
         normalized_kind = normalize_knowledge_kind(kind)
@@ -594,15 +696,22 @@ async def knowledge_edit_form(request: Request, space_key: str, kind: str, slug:
         doc = session.scalar(
             select(KnowledgeDocument)
             .join(Space, Space.id == KnowledgeDocument.space_id)
-            .where(Space.space_key == space_key, KnowledgeDocument.kind == normalized_kind, KnowledgeDocument.slug == slug)
+            .where(Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY, KnowledgeDocument.kind == normalized_kind, KnowledgeDocument.slug == slug)
         )
+        if doc is None:
+            doc = session.scalar(
+                select(KnowledgeDocument).where(
+                    KnowledgeDocument.kind == normalized_kind,
+                    KnowledgeDocument.slug == slug,
+                )
+            )
         if doc is None:
             raise HTTPException(status_code=404, detail="Knowledge page not found")
         markdown_path = _settings(request).wiki_root / doc.markdown_path
         _frontmatter, body_markdown = read_markdown_document(markdown_path)
-        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
-        display_title = _display_document_title(space_key, doc.title)
+        display_title = _display_document_title(None, doc.title)
         return _templates(request).TemplateResponse(
             request,
             "page_edit.html",
@@ -610,13 +719,13 @@ async def knowledge_edit_form(request: Request, space_key: str, kind: str, slug:
                 "request": request,
                 "spaces": spaces,
                 "space_name_by_key": space_name_by_key,
-                "selected_space": space_key,
-                "selected_space_name": space_name_by_key.get(space_key, space_key),
+                "selected_space": space or "all",
+                "selected_space_name": space_name_by_key.get(space or "", space or "전체 Space") if space and space != "all" else "전체 Space",
                 "page_title": display_title,
                 "page_kind": normalized_kind,
                 "body_markdown": body_markdown,
-                "form_action": f"/spaces/{space_key}/knowledge/{knowledge_segment(normalized_kind)}/{slug}/edit",
-                "cancel_href": knowledge_href(space_key, normalized_kind, slug),
+                "form_action": f"/knowledge/{knowledge_segment(normalized_kind)}/{slug}/edit",
+                "cancel_href": knowledge_href(normalized_kind, slug),
                 "edit_notice": _edit_notice(normalized_kind),
                 "meta_description": _meta_description(f"{display_title} 편집"),
             },
@@ -625,8 +734,28 @@ async def knowledge_edit_form(request: Request, space_key: str, kind: str, slug:
         session.close()
 
 
-@router.post("/spaces/{space_key}/knowledge/{kind}/{slug}/edit")
+@router.post("/knowledge/{kind}/{slug}/edit")
 async def knowledge_edit_save(
+    request: Request,
+    kind: str,
+    slug: str,
+    body: str = Form(...),
+    selected_space: str = Form(default=""),
+) -> RedirectResponse:
+    try:
+        result = KnowledgeService(_settings(request)).update_document_body(space_key=selected_space or "GLOBAL", kind=kind, slug=slug, body=body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=result["href"], status_code=303)
+
+
+@router.get("/spaces/{space_key}/knowledge/{kind}/{slug}/edit")
+async def knowledge_edit_form_legacy(space_key: str, kind: str, slug: str) -> RedirectResponse:
+    return RedirectResponse(url=f"/knowledge/{knowledge_segment(kind)}/{slug}/edit?space={space_key}", status_code=307)
+
+
+@router.post("/spaces/{space_key}/knowledge/{kind}/{slug}/edit")
+async def knowledge_edit_save_legacy(
     request: Request,
     space_key: str,
     kind: str,
@@ -648,7 +777,7 @@ async def synthesis_edit_form(request: Request, space_key: str) -> HTMLResponse:
         if not synthesis_path.exists():
             raise HTTPException(status_code=404, detail="Synthesis not found")
         _frontmatter, body_markdown = read_markdown_document(synthesis_path)
-        spaces = session.scalars(select(Space).order_by(Space.space_key)).all()
+        spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
         return _templates(request).TemplateResponse(
             request,
@@ -745,6 +874,33 @@ async def api_ask_save(request: Request, payload: dict) -> dict:
             scope=str(payload.get("scope") or ""),
             answer=str(payload.get("answer") or ""),
             sources=list(payload.get("sources") or []),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/knowledge/generate")
+async def generate_query_wiki(
+    request: Request,
+    q: str = Form(...),
+    space: str = Form(default=""),
+) -> RedirectResponse:
+    try:
+        result = KnowledgeService(_settings(request)).save_query_wiki(
+            query=q,
+            selected_space=None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=result["href"], status_code=303)
+
+
+@router.post("/api/wiki-from-query")
+async def api_generate_query_wiki(request: Request, payload: dict) -> dict:
+    try:
+        return KnowledgeService(_settings(request)).save_query_wiki(
+            query=str(payload.get("query") or ""),
+            selected_space=None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
