@@ -79,6 +79,16 @@ class RejectingExternalImageConfluenceClient(FakeConfluenceClient):
         return await super().download_bytes(download_path)
 
 
+class RecordingConfluenceClient(FakeConfluenceClient):
+    def __init__(self, events: list[str], **kwargs):
+        super().__init__(**kwargs)
+        self.events = events
+
+    async def fetch_page(self, page_id: str):
+        self.events.append(f"fetch_page:{page_id}")
+        return await super().fetch_page(page_id)
+
+
 def test_incremental_sync_creates_markdown_and_graph_artifacts(tmp_path, sample_settings_dict):
     from app.core.config import Settings
 
@@ -161,6 +171,34 @@ def test_incremental_sync_rebuilds_indexes_from_existing_db_state(tmp_path, samp
 
     assert "child-page-200" in index_text
     assert "child-page-200" in graph_text
+
+
+def test_incremental_sync_fetches_remote_pages_before_opening_write_session(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    events: list[str] = []
+    service = SyncService(
+        settings=settings,
+        confluence_client=RecordingConfluenceClient(events=events),
+        vision_client=FakeVisionClient(),
+    )
+    real_session_factory = service.session_factory
+
+    def wrapped_session_factory():
+        events.append("session_factory")
+        return real_session_factory()
+
+    service.session_factory = wrapped_session_factory
+
+    service.run_incremental(space_key="DEMO")
+
+    assert "session_factory" in events
+    assert "fetch_page:100" in events
+    assert events.index("fetch_page:100") < events.index("session_factory")
 
 
 def test_repeat_sync_does_not_duplicate_assets_or_versions(tmp_path, sample_settings_dict):

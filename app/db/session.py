@@ -4,7 +4,7 @@ from collections.abc import Generator
 from functools import lru_cache
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -14,11 +14,20 @@ from app.db.base import Base
 
 @lru_cache(maxsize=8)
 def create_engine_for_url(database_url: str) -> Engine:
+    is_sqlite = database_url.startswith("sqlite")
     if database_url.startswith("sqlite:///") and not database_url.endswith(":memory:"):
         database_path = Path(database_url.removeprefix("sqlite:///"))
         database_path.parent.mkdir(parents=True, exist_ok=True)
-    connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
+    connect_args = {"check_same_thread": False, "timeout": 30} if is_sqlite else {}
     engine = create_engine(database_url, future=True, pool_pre_ping=True, connect_args=connect_args)
+    if is_sqlite:
+        @event.listens_for(engine, "connect")
+        def _configure_sqlite(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.close()
     Base.metadata.create_all(engine)
     return engine
 

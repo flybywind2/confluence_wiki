@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from zoneinfo import ZoneInfo
 
+import yaml
 from sqlalchemy import delete, select
 
 from app.clients.confluence import ConfluenceClient
@@ -125,10 +126,23 @@ class SyncService:
         root_page_id: str | None,
         window_label: str | None = None,
     ) -> SyncResult:
+        unique_page_ids = list(dict.fromkeys(page_ids))
+        slug_lookup = {
+            page_id: (space_key, slug)
+            for page_id, slug in self._load_existing_page_slugs_from_markdown(space_key).items()
+        }
+        raw_pages: list[dict] = []
+        for page_id in unique_page_ids:
+            raw_page = await self.confluence_client.fetch_page(page_id)
+            raw_page["space_key"] = raw_page.get("space_key") or space_key
+            existing_slug = slug_lookup.get(raw_page["id"], ("", ""))[1]
+            raw_page["slug"] = existing_slug or page_slug(raw_page["title"], raw_page["id"])
+            raw_pages.append(raw_page)
+            slug_lookup[raw_page["id"]] = (space_key, raw_page["slug"])
+
         session = self.session_factory()
         processed_assets = 0
         try:
-            unique_page_ids = list(dict.fromkeys(page_ids))
             logger.info("sync start mode=%s space=%s pages=%s", mode, space_key, len(unique_page_ids))
             space = upsert_space(session, space_key=space_key, root_page_id=root_page_id)
             sync_run = SyncRun(mode=mode, space_id=space.id, status="running")
@@ -137,18 +151,6 @@ class SyncService:
 
             existing_pages = session.scalars(select(Page).where(Page.space_id == space.id)).all()
             existing_pages_by_confluence_id = {page.confluence_page_id: page for page in existing_pages}
-            slug_lookup: dict[str, tuple[str, str]] = {
-                page.confluence_page_id: (space_key, page.slug) for page in existing_pages
-            }
-
-            raw_pages: list[dict] = []
-            for page_id in unique_page_ids:
-                raw_page = await self.confluence_client.fetch_page(page_id)
-                raw_page["space_key"] = raw_page.get("space_key") or space_key
-                existing_page = existing_pages_by_confluence_id.get(raw_page["id"])
-                raw_page["slug"] = existing_page.slug if existing_page is not None else page_slug(raw_page["title"], raw_page["id"])
-                raw_pages.append(raw_page)
-                slug_lookup[raw_page["id"]] = (space_key, raw_page["slug"])
 
             page_records: dict[str, Page] = {}
             documents_for_index: list[dict[str, str]] = []
@@ -650,3 +652,23 @@ class SyncService:
             return datetime.fromisoformat(normalized)
         except ValueError:
             return None
+
+    def _load_existing_page_slugs_from_markdown(self, space_key: str) -> dict[str, str]:
+        pages_root = self.settings.wiki_root / "spaces" / space_key / "pages"
+        if not pages_root.exists():
+            return {}
+        page_slugs: dict[str, str] = {}
+        for path in pages_root.glob("*.md"):
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+                if not lines or lines[0].strip() != "---":
+                    continue
+                end_index = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+                frontmatter = yaml.safe_load("\n".join(lines[1:end_index])) or {}
+                page_id = str(frontmatter.get("page_id") or "").strip()
+                slug = str(frontmatter.get("slug") or path.stem).strip()
+                if page_id and slug:
+                    page_slugs[page_id] = slug
+            except (OSError, StopIteration, yaml.YAMLError):
+                continue
+        return page_slugs
