@@ -204,9 +204,9 @@ def test_knowledge_page_shows_edit_link_and_raw_page_does_not(tmp_path, sample_s
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
 
-    knowledge_response = client.get("/spaces/DEMO/knowledge/keywords/운영")
+    knowledge_response = client.get("/spaces/DEMO/knowledge/keywords/운영-대시보드")
     assert knowledge_response.status_code == 200
-    assert '/spaces/DEMO/knowledge/keywords/운영/edit' in knowledge_response.text
+    assert '/spaces/DEMO/knowledge/keywords/운영-대시보드/edit' in knowledge_response.text
 
     raw_response = client.get("/spaces/DEMO/pages/demo-home-9001")
     assert raw_response.status_code == 200
@@ -220,11 +220,11 @@ def test_knowledge_edit_form_renders_markdown_body(tmp_path, sample_settings_dic
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
-    response = client.get("/spaces/DEMO/knowledge/keywords/운영/edit")
+    response = client.get("/spaces/DEMO/knowledge/keywords/운영-대시보드/edit")
 
     assert response.status_code == 200
     assert "<textarea" in response.text
-    assert "키워드" in response.text
+    assert "운영 대시보드" in response.text
 
 
 def test_knowledge_edit_save_updates_rendered_content(tmp_path, sample_settings_dict):
@@ -234,22 +234,22 @@ def test_knowledge_edit_save_updates_rendered_content(tmp_path, sample_settings_
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
-    new_body = "# 운영\n\n수정된 본문입니다.\n\n- 새 메모"
+    new_body = "# 운영 대시보드\n\n수정된 본문입니다.\n\n- 새 메모"
 
     response = client.post(
-        "/spaces/DEMO/knowledge/keywords/운영/edit",
+        "/spaces/DEMO/knowledge/keywords/운영-대시보드/edit",
         data={"body": new_body},
         follow_redirects=False,
     )
 
     assert response.status_code == 303
-    assert response.headers["location"].endswith("/spaces/DEMO/knowledge/keywords/%EC%9A%B4%EC%98%81")
+    assert response.headers["location"].endswith("/spaces/DEMO/knowledge/keywords/%EC%9A%B4%EC%98%81-%EB%8C%80%EC%8B%9C%EB%B3%B4%EB%93%9C")
 
-    rendered = client.get("/spaces/DEMO/knowledge/keywords/운영")
+    rendered = client.get("/spaces/DEMO/knowledge/keywords/운영-대시보드")
     assert rendered.status_code == 200
     assert "수정된 본문입니다." in rendered.text
 
-    keyword_file = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords" / "운영.md"
+    keyword_file = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords" / "운영-대시보드.md"
     assert "수정된 본문입니다." in keyword_file.read_text(encoding="utf-8")
 
 

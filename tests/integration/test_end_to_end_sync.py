@@ -345,8 +345,8 @@ def test_incremental_sync_creates_multiple_keyword_documents(tmp_path, sample_se
     keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
     keyword_files = sorted(path.name for path in keyword_root.glob("*.md"))
 
-    assert "운영.md" in keyword_files
-    assert "동기화.md" in keyword_files
+    assert "운영-대시보드.md" in keyword_files
+    assert "동기화-런북.md" in keyword_files
     assert len(keyword_files) >= 2
 
 
@@ -372,11 +372,207 @@ def test_keyword_page_contains_related_docs_and_related_keywords(tmp_path, sampl
     service.run_incremental(space_key="DEMO")
 
     keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
-    keyword_page = keyword_root / "운영.md"
+    keyword_page = keyword_root / "운영-대시보드.md"
     content = keyword_page.read_text(encoding="utf-8")
 
     assert "## 관련 문서" in content
-    assert "## 관련 키워드" in content
+    assert "## 관련 주제" in content
+
+
+def test_ds_department_terms_normalize_without_display_guess(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100"],
+            title_overrides={"100": "삼성 DS 주간 회의록"},
+            body_overrides={
+                "100": (
+                    "<h1>Device Solutions 운영 현황</h1>"
+                    "<h2>HBM 일정</h2>"
+                    "<p>삼성 DS 요청사항과 DS부문 운영 내용을 정리합니다. "
+                    "Device Solutions 조직의 우선순위와 DS부문 이슈를 공유합니다.</p>"
+                )
+            },
+        ),
+    )
+
+    service.run_incremental(space_key="DEMO")
+
+    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_files = {path.name for path in keyword_root.glob("*.md")}
+
+    assert "ds부문.md" in keyword_files
+    assert "디스플레이.md" not in keyword_files
+    assert "삼성디스플레이.md" not in keyword_files
+
+
+def test_weak_title_uses_structural_keywords_from_headings_and_tables(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100"],
+            title_overrides={"100": "주간 회의록"},
+            body_overrides={
+                "100": (
+                    "<h1>HBM 진행 현황</h1>"
+                    "<h2>수율 점검</h2>"
+                    "<table><thead><tr><th>패키징</th><th>검증</th></tr></thead>"
+                    "<tbody><tr><td>진행</td><td>확인</td></tr></tbody></table>"
+                    "<p>HBM 수율과 패키징 검증 항목을 공유합니다.</p>"
+                )
+            },
+        ),
+    )
+
+    service.run_incremental(space_key="DEMO")
+
+    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_files = {path.name for path in keyword_root.glob("*.md")}
+
+    assert "hbm.md" in keyword_files
+    assert "수율.md" in keyword_files
+    assert "패키징.md" in keyword_files
+    assert "회의록.md" not in keyword_files
+
+
+def test_long_document_enforces_tripled_minimum_keyword_count(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    long_body = "".join(
+        [
+            "<h1>주간 회의록</h1>",
+            "<h2>HBM 현황</h2><p>HBM 일정과 HBM 수율을 상세히 정리합니다.</p>",
+            "<h2>수율 점검</h2><p>수율 분석과 수율 개선 항목을 정리합니다.</p>",
+            "<h2>패키징 상태</h2><p>패키징 공정과 패키징 일정 이슈를 공유합니다.</p>",
+            "<h2>테스트 계획</h2><p>테스트 범위와 테스트 일정, 테스트 위험을 정리합니다.</p>",
+            "<h2>공정 대응</h2><p>공정 변경과 공정 안정화 계획을 정리합니다.</p>",
+            "<h2>설계 변경</h2><p>설계 이슈와 설계 대응 방안을 정리합니다.</p>",
+            "<h2>검증 현황</h2><p>검증 결과와 검증 리스크를 정리합니다.</p>",
+            "<h2>공급망 이슈</h2><p>공급망 리스크와 공급망 대응안을 정리합니다.</p>",
+            "<h2>장애 대응</h2><p>장애 유형과 장애 대응 절차를 정리합니다.</p>",
+            "<h2>운영 지표</h2><p>운영 지표와 운영 현황을 정리합니다.</p>",
+        ]
+    )
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100"],
+            title_overrides={"100": "주간 회의록"},
+            body_overrides={"100": long_body},
+        ),
+    )
+
+    service.run_incremental(space_key="DEMO")
+
+    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_files = sorted(path.name for path in keyword_root.glob("*.md"))
+
+    assert len(keyword_files) >= 9
+
+
+def test_phrase_topics_prefer_structural_meaning_bundles(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100", "200"],
+            title_overrides={"100": "AI Portal 운영 점검", "200": "AI Agent 배포 회의"},
+            body_overrides={
+                "100": (
+                    "<h1>AI Portal 운영 현황</h1>"
+                    "<p>AI Portal 인증 흐름과 AI Portal 장애 대응 절차를 정리합니다.</p>"
+                ),
+                "200": (
+                    "<h1>AI Agent 배포 절차</h1>"
+                    "<p>AI Agent 운영 기준과 AI Agent 재시도 흐름을 설명합니다.</p>"
+                ),
+            },
+        ),
+    )
+
+    service.run_incremental(space_key="DEMO")
+
+    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    keyword_files = {path.name for path in keyword_root.glob("*.md")}
+
+    assert "ai-portal.md" in keyword_files
+    assert "ai-agent.md" in keyword_files
+    assert "ai.md" not in keyword_files
+    assert "portal.md" not in keyword_files
+    assert "agent.md" not in keyword_files
+    assert "# AI Portal" in (keyword_root / "ai-portal.md").read_text(encoding="utf-8")
+
+
+def test_existing_phrase_topic_absorbs_related_document_even_with_weak_title(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    first_service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100"],
+            title_overrides={"100": "DS Assistant 운영 개요"},
+            body_overrides={
+                "100": (
+                    "<h1>DS Assistant 운영 개요</h1>"
+                    "<p>DS Assistant 사용 흐름과 DS Assistant 공통 정책을 설명합니다.</p>"
+                )
+            },
+        ),
+    )
+    first_service.run_incremental(space_key="DEMO")
+
+    second_service = SyncService(
+        settings=settings,
+        confluence_client=FakeConfluenceClient(
+            search_ids=["100", "200"],
+            title_overrides={"100": "DS Assistant 운영 개요", "200": "주간 회의록"},
+            body_overrides={
+                "100": (
+                    "<h1>DS Assistant 운영 개요</h1>"
+                    "<p>DS Assistant 사용 흐름과 DS Assistant 공통 정책을 설명합니다.</p>"
+                ),
+                "200": (
+                    "<h1>장애 대응</h1>"
+                    "<h2>Assistant 이슈 공유</h2>"
+                    "<p>DS Assistant 장애 복구 절차와 DS Assistant 대응 대상을 공유합니다.</p>"
+                ),
+            },
+        ),
+    )
+    second_service.run_incremental(space_key="DEMO")
+
+    keyword_root = tmp_path / "wiki" / "spaces" / "DEMO" / "knowledge" / "keywords"
+    ds_assistant = (keyword_root / "ds-assistant.md").read_text(encoding="utf-8")
+
+    assert "DS Assistant 운영 개요" in ds_assistant
+    assert "주간 회의록" in ds_assistant
+    assert "ds.md" not in {path.name for path in keyword_root.glob("*.md")}
 
 
 def test_page_slug_stays_stable_when_title_changes(tmp_path, sample_settings_dict):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime
 import re
 import uuid
@@ -21,8 +22,120 @@ from app.services.index_builder import append_space_log, build_global_index, bui
 from app.services.wiki_writer import write_knowledge_markdown, write_markdown_file
 
 TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+PHRASE_TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]+")
 MARKDOWN_LINK_RE = re.compile(r"\[(?P<label>[^\]]+)\]\((?P<href>[^)]+)\)")
 WIKI_LINK_RE = re.compile(r"!\[\[(?P<embed>[^\]]+)\]\]|\[\[(?P<target>[^\]|]+)(?:\|(?P<label>[^\]]+))?\]\]")
+MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(?P<text>.+?)\s*$")
+MARKDOWN_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$")
+ASCII_WITH_PARTICLE_RE = re.compile(r"^(?P<base>[A-Za-z]+)(?P<particle>가|이|는|은|를|을|와|과|의|도|만|로|에)$")
+BODY_FRAGMENT_SPLIT_RE = re.compile(r"[\n\r.!?;:]+")
+PHRASE_NORMALIZATIONS = (
+    (re.compile(r"삼성\s*DS", re.IGNORECASE), "DS부문"),
+    (re.compile(r"삼성DS", re.IGNORECASE), "DS부문"),
+    (re.compile(r"DS\s*부문", re.IGNORECASE), "DS부문"),
+    (re.compile(r"Device\s+Solutions", re.IGNORECASE), "DS부문"),
+)
+TITLE_BLACKLIST = {
+    "회의록",
+    "회의",
+    "주간",
+    "월간",
+    "일간",
+    "공지",
+    "자료",
+    "자료공유",
+    "공유",
+    "정리",
+    "업데이트",
+}
+GENERIC_CONTEXT_STOPWORDS = {
+    "개요",
+    "체크리스트",
+    "현황",
+    "진행",
+    "상태",
+    "점검",
+    "계획",
+    "대응",
+    "요청사항",
+    "내용",
+    "항목",
+    "결과",
+    "유형",
+    "사항",
+    "바로가기",
+    "요소",
+    "방식",
+    "포인트",
+    "보기",
+    "전환",
+    "왼쪽",
+    "상단",
+    "예시",
+    "위한",
+    "확인하기",
+    "가능한",
+    "화면으로",
+    "화면",
+    "화면에서",
+    "실제",
+    "값",
+    "표",
+    "홈",
+    "후",
+    "어떤",
+    "여러",
+    "중심",
+    "사이드바",
+    "원문",
+    "그래프",
+    "graph",
+    "knowledge",
+    "preview",
+    "view",
+    "atlas",
+    "bootstrap",
+    "cache",
+    "hierarchy",
+    "static",
+    "link",
+    "conf",
+    "mirror",
+    "svg",
+    "url",
+    "prod",
+    "stg",
+    "ui",
+    "false",
+    "true",
+}
+LOW_SIGNAL_SUFFIXES = (
+    "합니다",
+    "됩니다",
+    "있는지",
+    "하는지",
+    "했는지",
+    "되었는지",
+    "되었는가",
+)
+KOREAN_PARTICLE_SUFFIXES = (
+    "으로",
+    "와의",
+    "과의",
+    "과",
+    "와",
+    "을",
+    "를",
+    "은",
+    "는",
+    "이",
+    "가",
+    "의",
+    "도",
+    "로",
+    "에",
+    "만",
+)
 STOPWORDS = {
     "위키",
     "문서",
@@ -53,7 +166,36 @@ STOPWORDS = {
     "td",
     "tr",
     "th",
+    *TITLE_BLACKLIST,
+    *GENERIC_CONTEXT_STOPWORDS,
 }
+SOURCE_WEIGHTS = {
+    "title": 9,
+    "heading": 7,
+    "table": 5,
+    "link": 4,
+    "summary": 3,
+    "body": 2,
+    "existing": 6,
+}
+MAX_PHRASE_TOKENS = 2
+
+
+@dataclass(frozen=True)
+class PhraseToken:
+    display: str
+    key: str
+
+
+@dataclass
+class PhraseCandidate:
+    key: str
+    display: str
+    score: int = 0
+    occurrences: int = 0
+    token_count: int = 1
+    components: tuple[str, ...] = ()
+    sources: set[str] = field(default_factory=set)
 
 
 class KnowledgeService:
@@ -78,7 +220,7 @@ class KnowledgeService:
         space = session.scalar(select(Space).where(Space.space_key == space_key))
         if space is None:
             return []
-        existing_keyword_tokens = self._existing_keyword_tokens(session, space.id)
+        existing_keyword_topics = self._existing_keyword_topics(session, space.id)
 
         session.execute(
             delete(KnowledgeDocument).where(
@@ -102,7 +244,7 @@ class KnowledgeService:
             body = read_markdown_body(markdown_path) if markdown_path.exists() else ""
             summary = wiki_document.summary or self._first_line(body)
             fact_card = self.text_client.summarize_fact_card(page.title, body)
-            token_counts = self._extract_keyword_counts(space.space_key, page.title, summary, body)
+            keyword_signal = self._extract_keyword_signal(space.space_key, page.title, summary, body)
             fact_cards.append(
                 {
                     "title": page.title,
@@ -111,7 +253,7 @@ class KnowledgeService:
                     "href": f"/spaces/{space_key}/pages/{page.slug}",
                     "fact_card": fact_card,
                     "body": body,
-                    "token_counts": token_counts,
+                    "keyword_signal": keyword_signal,
                 }
             )
             entity_body = "\n".join(
@@ -152,7 +294,7 @@ class KnowledgeService:
                 )
             )
 
-        for keyword in self._build_keyword_documents(space_key, fact_cards, existing_keyword_tokens):
+        for keyword in self._build_keyword_documents(space_key, fact_cards, existing_keyword_topics):
             docs.append(
                 self._upsert_document(
                     session=session,
@@ -443,52 +585,49 @@ class KnowledgeService:
         self,
         space_key: str,
         fact_cards: list[dict[str, str]],
-        existing_keywords: set[str],
+        existing_topics: dict[str, str],
     ) -> list[dict[str, str]]:
         if not fact_cards:
             return []
 
-        total_counts: Counter[str] = Counter()
+        total_scores: Counter[str] = Counter()
         doc_counts: Counter[str] = Counter()
+        selected_topics_by_slug: dict[str, list[str]] = {}
         for item in fact_cards:
-            token_counts = item["token_counts"]
-            total_counts.update(token_counts)
-            for token in token_counts:
-                doc_counts[token] += 1
-
-        eligible = {
-            token
-            for token, count in total_counts.items()
-            if doc_counts[token] >= 2 or count >= 3 or token in existing_keywords
-        }
-        if not eligible:
-            eligible = {token for token, _count in total_counts.most_common(6)}
+            signal = item["keyword_signal"]
+            selected_topics = self._select_keywords_for_page(signal, existing_topics)
+            selected_topics_by_slug[item["slug"]] = selected_topics
+            candidates: dict[str, PhraseCandidate] = signal["candidates"]  # type: ignore[assignment]
+            for topic in selected_topics:
+                topic_key = self._normalize_topic_key(topic)
+                total_scores[topic] += candidates.get(topic_key, PhraseCandidate(key=topic_key, display=topic)).score or 1
+                doc_counts[topic] += 1
 
         keyword_pages: dict[str, list[dict[str, str]]] = {}
         co_occurrence: dict[str, Counter[str]] = {}
         for item in fact_cards:
-            selected_keywords = self._select_keywords_for_page(item["token_counts"], total_counts, doc_counts, eligible)
-            if not selected_keywords:
+            selected_topics = selected_topics_by_slug.get(item["slug"], [])
+            if not selected_topics:
                 continue
-            for keyword in selected_keywords:
-                keyword_pages.setdefault(keyword, []).append(item)
-            for keyword in selected_keywords:
-                neighbors = [candidate for candidate in selected_keywords if candidate != keyword]
-                co_occurrence.setdefault(keyword, Counter()).update(neighbors)
+            for topic in selected_topics:
+                keyword_pages.setdefault(topic, []).append(item)
+            for topic in selected_topics:
+                neighbors = [candidate for candidate in selected_topics if candidate != topic]
+                co_occurrence.setdefault(topic, Counter()).update(neighbors)
 
         documents: list[dict[str, str]] = []
-        for keyword, items in sorted(
+        for topic, items in sorted(
             keyword_pages.items(),
-            key=lambda pair: (-doc_counts[pair[0]], -total_counts[pair[0]], pair[0]),
+            key=lambda pair: (-doc_counts[pair[0]], -total_scores[pair[0]], pair[0]),
         ):
-            related_keywords = [candidate for candidate, _count in co_occurrence.get(keyword, Counter()).most_common(6)]
-            synthesized = self.text_client.synthesize_keyword_page(space_key, keyword, items, related_keywords)
+            related_topics = [candidate for candidate, _count in co_occurrence.get(topic, Counter()).most_common(6)]
+            synthesized = self.text_client.synthesize_topic_page(space_key, topic, items, related_topics)
             documents.append(
                 {
-                    "slug": self._keyword_slug(keyword),
-                    "title": keyword,
-                    "summary": self._keyword_summary(keyword, items),
-                    "body": self._ensure_keyword_sections(space_key, keyword, items, related_keywords, synthesized),
+                    "slug": self._keyword_slug(topic),
+                    "title": topic,
+                    "summary": self._keyword_summary(topic, items),
+                    "body": self._ensure_keyword_sections(space_key, topic, items, related_topics, synthesized),
                     "source_refs": [page_link(space_key, item["slug"], item["title"]) for item in items],
                 }
             )
@@ -508,7 +647,7 @@ class KnowledgeService:
         titles = ", ".join(item["title"] for item in items[:2])
         if len(items) > 2:
             titles = f"{titles} 외 {len(items) - 2}건"
-        return f"{topic} 키워드와 직접 연결되는 문서: {titles}"
+        return f"{topic} 주제와 직접 연결되는 문서: {titles}"
 
     def _ensure_keyword_sections(
         self,
@@ -522,10 +661,10 @@ class KnowledgeService:
             "## 개요": self._default_keyword_overview(space_key, title, items),
             "## 핵심 사실": "\n".join(f"- {item['title']}: {item['summary']}" for item in items) or "- 정보 없음",
             "## 관련 문서": "\n".join(self._page_reference(space_key, item) for item in items),
-            "## 관련 키워드": "\n".join(
+            "## 관련 주제": "\n".join(
                 f"- {knowledge_link(space_key, 'keyword', self._keyword_slug(keyword), keyword)}" for keyword in related_keywords if keyword != title
             )
-            or "- 관련 키워드가 아직 충분히 추출되지 않았습니다.",
+            or "- 관련 주제가 아직 충분히 정리되지 않았습니다.",
             "## 원문 근거": "\n".join(self._page_reference(space_key, item) for item in items),
         }
         normalized = body.strip()
@@ -539,68 +678,367 @@ class KnowledgeService:
     @staticmethod
     def _default_keyword_overview(space_key: str, title: str, items: list[dict[str, str]]) -> str:
         if not items:
-            return f"{space_key} space에서 '{title}' 키워드와 연결되는 문서를 묶은 페이지입니다."
-        return f"{space_key} space에서 '{title}' 키워드가 반복적으로 등장하는 원문을 모아 빠르게 파악할 수 있게 정리한 문서입니다."
+            return f"{space_key} space에서 '{title}' 주제와 연결되는 문서를 묶은 페이지입니다."
+        return f"{space_key} space에서 '{title}' 주제와 반복적으로 연결되는 원문을 모아 빠르게 파악할 수 있게 정리한 문서입니다."
 
     @staticmethod
     def _page_reference(space_key: str, item: dict[str, str]) -> str:
         return f"- {page_link(space_key, item['slug'], item['title'])}"
 
-    def _existing_keyword_tokens(self, session, space_id: int) -> set[str]:
+    def _existing_keyword_topics(self, session, space_id: int) -> dict[str, str]:
         existing_docs = session.scalars(
             select(KnowledgeDocument).where(KnowledgeDocument.space_id == space_id, KnowledgeDocument.kind == "keyword")
         ).all()
-        return {self._normalize_keyword_token(doc.title) for doc in existing_docs if doc.title}
-
-    def _extract_keyword_counts(self, space_key: str, title: str, summary: str, body: str) -> Counter[str]:
-        normalized_body = self._normalize_keyword_source(body)
-        weighted_text = " ".join([title] * 3 + [summary] * 2 + [normalized_body])
-        counts: Counter[str] = Counter()
-        for token in TOKEN_RE.findall(weighted_text):
-            normalized = self._normalize_keyword_token(token)
-            if not normalized or normalized in STOPWORDS or normalized == space_key.lower():
+        topics: dict[str, str] = {}
+        for doc in existing_docs:
+            if not doc.title:
                 continue
-            counts[normalized] += 1
-        return counts
+            topics[self._normalize_topic_key(doc.title)] = doc.title
+        return topics
+
+    def _extract_keyword_signal(self, space_key: str, title: str, summary: str, body: str) -> dict[str, object]:
+        normalized_title = self._apply_phrase_normalization(title)
+        normalized_summary = self._apply_phrase_normalization(summary)
+        normalized_body = self._normalize_keyword_source(body)
+
+        candidates: dict[str, PhraseCandidate] = {}
+        document_token_counts: Counter[str] = Counter()
+        structural_token_counts: Counter[str] = Counter()
+
+        fragments_by_source = {
+            "title": [normalized_title],
+            "heading": self._extract_heading_texts(body),
+            "table": self._extract_table_header_texts(body),
+            "link": self._extract_link_texts(body),
+            "summary": [normalized_summary] if normalized_summary else [],
+            "body": self._extract_body_fragments(normalized_body),
+        }
+
+        for source, fragments in fragments_by_source.items():
+            for fragment in fragments:
+                tokens = self._extract_phrase_tokens(fragment, space_key, drop_title_blacklist=source != "title")
+                if not tokens:
+                    continue
+                for token in tokens:
+                    document_token_counts[token.key] += 1
+                    if source != "body":
+                        structural_token_counts[token.key] += 1
+                self._register_phrase_candidates(candidates, tokens, source)
+
+        return {
+            "page_title": title,
+            "page_summary": summary,
+            "candidates": candidates,
+            "document_token_counts": document_token_counts,
+            "structural_token_counts": structural_token_counts,
+            "doc_length": len(normalized_body),
+        }
+
+    def _select_keywords_for_page(self, signal: dict[str, object], existing_topics: dict[str, str]) -> list[str]:
+        candidates: dict[str, PhraseCandidate] = {
+            key: PhraseCandidate(
+                key=value.key,
+                display=value.display,
+                score=value.score,
+                occurrences=value.occurrences,
+                token_count=value.token_count,
+                components=value.components,
+                sources=set(value.sources),
+            )
+            for key, value in (signal["candidates"] or {}).items()  # type: ignore[union-attr]
+        }
+        document_token_counts: Counter[str] = signal["document_token_counts"]  # type: ignore[assignment]
+        doc_length = int(signal["doc_length"])  # type: ignore[arg-type]
+
+        self._inject_existing_topic_candidates(candidates, existing_topics, document_token_counts)
+
+        minimum_count = self._minimum_keyword_count(doc_length)
+        candidate_payload = [
+            {
+                "topic": candidate.display,
+                "key": candidate.key,
+                "score": candidate.score,
+                "occurrences": candidate.occurrences,
+                "sources": sorted(candidate.sources),
+                "token_count": candidate.token_count,
+                "components": list(candidate.components),
+            }
+            for candidate in sorted(
+                (candidate for candidate in candidates.values() if self._is_candidate_usable(candidate)),
+                key=lambda item: (-item.token_count, -item.score, -item.occurrences, item.display.lower()),
+            )
+        ]
+        return self.text_client.select_topic_phrases(
+            page_title=str(signal["page_title"]),
+            page_summary=str(signal["page_summary"] or ""),
+            candidates=candidate_payload,
+            existing_topics=list(existing_topics.values()),
+            minimum_count=minimum_count,
+        )
 
     @staticmethod
-    def _normalize_keyword_token(token: str) -> str:
-        return str(token or "").strip().lower()
+    def _is_candidate_usable(candidate: PhraseCandidate) -> bool:
+        if candidate.token_count > 1:
+            return True
+        if candidate.occurrences >= 2:
+            return True
+        return candidate.sources != {"body"}
+
+    @classmethod
+    def _minimum_keyword_count(cls, doc_length: int) -> int:
+        if doc_length <= 150:
+            return 3
+        if doc_length <= 300:
+            return 6
+        if doc_length <= 600:
+            return 9
+        if doc_length <= 2000:
+            return 12
+        if doc_length <= 5000:
+            return 15
+        return 18
+
+    @classmethod
+    def _extract_phrase_tokens(cls, text: str, space_key: str, drop_title_blacklist: bool = True) -> list[PhraseToken]:
+        tokens: list[PhraseToken] = []
+        normalized_text = cls._apply_phrase_normalization(text)
+        for raw_token in PHRASE_TOKEN_RE.findall(normalized_text):
+            token = cls._normalize_phrase_token(raw_token, space_key, drop_title_blacklist=drop_title_blacklist)
+            if token is not None:
+                tokens.append(token)
+        return tokens
+
+    @classmethod
+    def _normalize_phrase_token(
+        cls,
+        raw_token: str,
+        space_key: str,
+        drop_title_blacklist: bool = True,
+    ) -> PhraseToken | None:
+        normalized = cls._apply_phrase_normalization(str(raw_token or "").strip())
+        if not normalized or normalized[0].isdigit():
+            return None
+        ascii_with_particle = ASCII_WITH_PARTICLE_RE.match(normalized)
+        if ascii_with_particle:
+            normalized = ascii_with_particle.group("base")
+        normalized = cls._strip_korean_particle(normalized)
+        if len(normalized) < 2:
+            return None
+        key = cls._normalize_topic_key(normalized)
+        if not key or key == space_key.lower():
+            return None
+        if key in STOPWORDS:
+            return None
+        if drop_title_blacklist and key in TITLE_BLACKLIST:
+            return None
+        if any(key.endswith(suffix) for suffix in LOW_SIGNAL_SUFFIXES):
+            return None
+        display = cls._display_topic_token(normalized)
+        return PhraseToken(display=display, key=key)
+
+    @classmethod
+    def _register_phrase_candidates(
+        cls,
+        candidates: dict[str, PhraseCandidate],
+        tokens: list[PhraseToken],
+        source: str,
+    ) -> None:
+        if not tokens:
+            return
+        base_weight = SOURCE_WEIGHTS.get(source, 1)
+        for token in tokens:
+            cls._add_phrase_candidate(candidates, [token], source, max(1, base_weight - 2))
+        if source == "body":
+            return
+        upper_bound = min(MAX_PHRASE_TOKENS, len(tokens))
+        for size in range(2, upper_bound + 1):
+            for start in range(0, len(tokens) - size + 1):
+                phrase_tokens = tokens[start : start + size]
+                if not cls._is_meaningful_phrase(phrase_tokens):
+                    continue
+                cls._add_phrase_candidate(candidates, phrase_tokens, source, base_weight + size)
+
+    @classmethod
+    def _add_phrase_candidate(
+        cls,
+        candidates: dict[str, PhraseCandidate],
+        tokens: list[PhraseToken],
+        source: str,
+        weight: int,
+    ) -> None:
+        display = " ".join(token.display for token in tokens).strip()
+        key = cls._normalize_topic_key(display)
+        if not key:
+            return
+        candidate = candidates.get(key)
+        if candidate is None:
+            candidate = PhraseCandidate(
+                key=key,
+                display=display,
+                token_count=len(tokens),
+                components=tuple(token.key for token in tokens),
+            )
+            candidates[key] = candidate
+        elif cls._prefer_display(display, candidate.display):
+            candidate.display = display
+        candidate.score += weight
+        candidate.occurrences += 1
+        candidate.sources.add(source)
+
+    @classmethod
+    def _inject_existing_topic_candidates(
+        cls,
+        candidates: dict[str, PhraseCandidate],
+        existing_topics: dict[str, str],
+        document_token_counts: Counter[str],
+    ) -> None:
+        for key, display in existing_topics.items():
+            components = cls._topic_components(display)
+            if not components:
+                continue
+            if not all(document_token_counts.get(component, 0) > 0 for component in components):
+                continue
+            candidate = candidates.get(key)
+            if candidate is None:
+                candidates[key] = PhraseCandidate(
+                    key=key,
+                    display=display,
+                    score=SOURCE_WEIGHTS["existing"],
+                    occurrences=1,
+                    token_count=len(components),
+                    components=tuple(components),
+                    sources={"existing"},
+                )
+                continue
+            candidate.score += SOURCE_WEIGHTS["existing"]
+            candidate.occurrences += 1
+            candidate.sources.add("existing")
+
+    @classmethod
+    def _topic_components(cls, text: str) -> list[str]:
+        components: list[str] = []
+        for raw_token in PHRASE_TOKEN_RE.findall(cls._apply_phrase_normalization(text)):
+            key = cls._normalize_topic_key(raw_token)
+            if key and key not in STOPWORDS:
+                components.append(key)
+        return components
 
     @staticmethod
-    def _normalize_keyword_source(body: str) -> str:
-        text = str(body or "")
+    def _prefer_display(candidate: str, existing: str) -> bool:
+        if len(candidate.split()) != len(existing.split()):
+            return len(candidate.split()) > len(existing.split())
+        return candidate != candidate.lower() and existing == existing.lower()
+
+    @staticmethod
+    def _is_meaningful_phrase(tokens: list[PhraseToken]) -> bool:
+        if len(tokens) < 2:
+            return False
+        unique_keys = {token.key for token in tokens}
+        return len(unique_keys) == len(tokens)
+
+    @classmethod
+    def _display_topic_token(cls, token: str) -> str:
+        normalized = cls._apply_phrase_normalization(token)
+        if normalized == "DS부문":
+            return "DS부문"
+        if normalized.isupper():
+            return normalized
+        if normalized.isascii():
+            return normalized.title()
+        return normalized
+
+    @classmethod
+    def _normalize_topic_key(cls, token: str) -> str:
+        normalized = cls._apply_phrase_normalization(str(token or "").strip())
+        if not normalized:
+            return ""
+        if normalized == "DS부문":
+            return "ds부문"
+        normalized = cls._strip_korean_particle(normalized)
+        if len(normalized) < 2:
+            return ""
+        if normalized and normalized[0].isdigit():
+            return ""
+        return normalized.lower()
+
+    @staticmethod
+    def _strip_korean_particle(token: str) -> str:
+        normalized = str(token or "").strip()
+        for suffix in KOREAN_PARTICLE_SUFFIXES:
+            if len(normalized) > len(suffix) + 1 and normalized.endswith(suffix):
+                return normalized[: -len(suffix)]
+        return normalized
+
+    @classmethod
+    def _apply_phrase_normalization(cls, text: str) -> str:
+        normalized = str(text or "")
+        for pattern, replacement in PHRASE_NORMALIZATIONS:
+            normalized = pattern.sub(replacement, normalized)
+        return normalized
+
+    @classmethod
+    def _normalize_keyword_source(cls, body: str) -> str:
+        text = cls._apply_phrase_normalization(body)
         text = WIKI_LINK_RE.sub(lambda match: match.group("label") or match.group("target") or "", text)
         text = MARKDOWN_LINK_RE.sub(lambda match: match.group("label"), text)
         text = text.replace("![[", "[[")
         return BeautifulSoup(text, "html.parser").get_text(" ", strip=True)
 
+    @classmethod
+    def _extract_body_fragments(cls, body_text: str) -> list[str]:
+        fragments = [fragment.strip() for fragment in BODY_FRAGMENT_SPLIT_RE.split(body_text) if fragment.strip()]
+        return fragments
+
+    @classmethod
+    def _extract_heading_texts(cls, body: str) -> list[str]:
+        headings: list[str] = []
+        normalized = cls._apply_phrase_normalization(body)
+        for line in normalized.splitlines():
+            match = MARKDOWN_HEADING_RE.match(line.strip())
+            if match:
+                headings.append(match.group("text"))
+        soup = BeautifulSoup(normalized, "html.parser")
+        for element in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+            text = element.get_text(" ", strip=True)
+            if text:
+                headings.append(text)
+        return headings
+
+    @classmethod
+    def _extract_table_header_texts(cls, body: str) -> list[str]:
+        headers: list[str] = []
+        normalized = cls._apply_phrase_normalization(body)
+        soup = BeautifulSoup(normalized, "html.parser")
+        for element in soup.find_all("th"):
+            text = element.get_text(" ", strip=True)
+            if text:
+                headers.append(text)
+        lines = normalized.splitlines()
+        for index, line in enumerate(lines[:-1]):
+            if "|" not in line:
+                continue
+            if not MARKDOWN_TABLE_SEPARATOR_RE.match(lines[index + 1].strip()):
+                continue
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            headers.extend(cell for cell in cells if cell)
+        return headers
+
+    @classmethod
+    def _extract_link_texts(cls, body: str) -> list[str]:
+        texts: list[str] = []
+        normalized = cls._apply_phrase_normalization(body)
+        for match in MARKDOWN_LINK_RE.finditer(normalized):
+            label = (match.group("label") or "").strip()
+            if label:
+                texts.append(label)
+        for match in WIKI_LINK_RE.finditer(normalized):
+            if match.group("embed"):
+                continue
+            label = (match.group("label") or match.group("target") or "").strip()
+            if label:
+                texts.append(label)
+        return texts
+
     @staticmethod
     def _keyword_slug(keyword: str) -> str:
         return slugify(keyword, allow_unicode=True) or "keyword"
-
-    @staticmethod
-    def _select_keywords_for_page(
-        token_counts: Counter[str],
-        total_counts: Counter[str],
-        doc_counts: Counter[str],
-        eligible: set[str],
-    ) -> list[str]:
-        ranked = [
-            token
-            for token, _count in sorted(
-                token_counts.items(),
-                key=lambda item: (-item[1], -doc_counts[item[0]], -total_counts[item[0]], item[0]),
-            )
-            if token in eligible
-        ]
-        if ranked:
-            return ranked[:3]
-        fallback = [
-            token
-            for token, _count in sorted(
-                token_counts.items(),
-                key=lambda item: (-item[1], -doc_counts[item[0]], -total_counts[item[0]], item[0]),
-            )
-        ]
-        return fallback[:1]

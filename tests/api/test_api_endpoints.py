@@ -74,8 +74,8 @@ def test_search_prefers_knowledge_docs_and_hides_raw_pages_by_default(tmp_path, 
     response = client.get("/search", params={"q": "런북", "space": "DEMO"})
 
     assert response.status_code == 200
-    assert "동기화 런북" not in response.text
-    assert "동기화" in response.text or "운영" in response.text or "분석" in response.text
+    assert 'href="/spaces/DEMO/pages/sync-runbook-9003"' not in response.text
+    assert 'href="/spaces/DEMO/knowledge/keywords/동기화-런북"' in response.text
 
 
 def test_graph_endpoint_can_return_knowledge_graph_nodes(tmp_path, sample_settings_dict):
