@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -86,7 +87,18 @@ def _display_document_title(space_key: str | None, title: str | None) -> str:
 
 
 def _is_editable_knowledge_kind(kind: str) -> bool:
-    return normalize_knowledge_kind(kind) in {"keyword", "analysis", "query", "lint"}
+    return normalize_knowledge_kind(kind) in {"entity", "keyword", "analysis", "query", "lint"}
+
+
+def _is_regenerable_knowledge_kind(kind: str) -> bool:
+    return normalize_knowledge_kind(kind) in {"entity", "keyword", "analysis", "query", "lint"}
+
+
+def _knowledge_regenerate_label(kind: str) -> str:
+    normalized_kind = normalize_knowledge_kind(kind)
+    if normalized_kind in {"entity", "keyword", "analysis", "query"}:
+        return "LLM 재작성"
+    return "다시 생성"
 
 
 def _history_snapshot_path(request: Request, space_key: str, slug: str, version_number: int) -> Path:
@@ -371,6 +383,9 @@ async def knowledge_view(request: Request, kind: str, slug: str, space: str | No
                 "history_notice": None,
                 "current_page_href": None,
                 "edit_href": f"/knowledge/{knowledge_segment(normalized_kind)}/{slug}/edit" if _is_editable_knowledge_kind(normalized_kind) else None,
+                "regenerate_href": f"/knowledge/{knowledge_segment(normalized_kind)}/{quote(slug)}/regenerate" if _is_regenerable_knowledge_kind(normalized_kind) else None,
+                "regenerate_label": _knowledge_regenerate_label(normalized_kind) if _is_regenerable_knowledge_kind(normalized_kind) else None,
+                "regenerate_selected_space": "" if (space or "all") == "all" else (space or ""),
                 "source_links": source_links,
                 "meta_description": _meta_description(doc.summary or display_title),
             },
@@ -753,6 +768,24 @@ async def knowledge_edit_save(
     return RedirectResponse(url=result["href"], status_code=303)
 
 
+@router.post("/knowledge/{kind}/{slug}/regenerate")
+async def knowledge_regenerate(
+    request: Request,
+    kind: str,
+    slug: str,
+    selected_space: str = Form(default=""),
+) -> RedirectResponse:
+    try:
+        result = KnowledgeService(_settings(request)).regenerate_document(
+            kind=kind,
+            slug=slug,
+            selected_space=selected_space or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=result["href"], status_code=303)
+
+
 @router.get("/spaces/{space_key}/knowledge/{kind}/{slug}/edit")
 async def knowledge_edit_form_legacy(space_key: str, kind: str, slug: str) -> RedirectResponse:
     return RedirectResponse(url=f"/knowledge/{knowledge_segment(kind)}/{slug}/edit?space={space_key}", status_code=307)
@@ -768,6 +801,24 @@ async def knowledge_edit_save_legacy(
 ) -> RedirectResponse:
     try:
         result = KnowledgeService(_settings(request)).update_document_body(space_key=space_key, kind=kind, slug=slug, body=body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(url=result["href"], status_code=303)
+
+
+@router.post("/spaces/{space_key}/knowledge/{kind}/{slug}/regenerate")
+async def knowledge_regenerate_legacy(
+    request: Request,
+    space_key: str,
+    kind: str,
+    slug: str,
+) -> RedirectResponse:
+    try:
+        result = KnowledgeService(_settings(request)).regenerate_document(
+            kind=kind,
+            slug=slug,
+            selected_space=space_key,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RedirectResponse(url=result["href"], status_code=303)

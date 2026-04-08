@@ -19,23 +19,13 @@
           <a href="/">문서 홈</a>
           <a href="/graph{% if selected_space and selected_space != 'all' %}?space={{ selected_space }}{% endif %}">Graph View</a>
         </nav>
-        <div class="sidebar-block">
-          <div class="sidebar-title">Space</div>
-          <a class="{% if selected_space == 'all' %}active{% endif %}" href="/">전체</a>
-          {% for space in spaces %}
-          <a class="{% if selected_space == space.space_key %}active{% endif %}" href="/spaces/{{ space.space_key }}">{{ space.name or space.space_key }}</a>
-          {% endfor %}
-        </div>
         <form class="search-box" action="/search" method="get">
           <input type="text" name="q" placeholder="문서 검색" value="{{ search_query or '' }}" />
-          {% if selected_space and selected_space != 'all' %}
-          <input type="hidden" name="space" value="{{ selected_space }}" />
-          {% endif %}
           <div class="search-actions">
-            <button type="submit">검색</button>
+            <button type="submit" class="sidebar-action-button">검색</button>
+            <button type="button" class="sidebar-action-button" id="query-generator-open">위키 생성</button>
           </div>
         </form>
-        <button type="button" class="sidebar-secondary-button" id="query-generator-open">위키 작성</button>
       </aside>
       <main class="content">
         {% block content %}{% endblock %}
@@ -113,7 +103,7 @@
       <header class="query-generator-header">
         <div>
           <div class="eyebrow">Query Wiki</div>
-          <h2 id="query-generator-title">검색 위키 작성</h2>
+          <h2 id="query-generator-title">검색 위키 생성</h2>
           <p class="query-generator-scope" id="query-generator-scope"></p>
         </div>
         <button type="button" class="assistant-close" id="query-generator-close" aria-label="닫기">×</button>

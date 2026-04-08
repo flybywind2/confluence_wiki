@@ -6,17 +6,34 @@ from app.core.markdown import read_markdown_document
 from app.db.models import Page, PageVersion
 from app.db.session import create_session_factory
 from app.demo_seed import seed_demo_content
+from app.services.knowledge_service import KnowledgeService
 from app.main import app, create_app
 from app.services.wiki_writer import write_markdown_file
 
 
-def test_index_page_renders_space_selector():
+def test_index_page_hides_space_selector_and_document_kind_filter():
     client = TestClient(app)
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "space" in response.text.lower()
+    assert '<div class="sidebar-title">Space</div>' not in response.text
+    assert ">문서 유형<" not in response.text
     assert "위키에게 묻기" in response.text
+
+
+def test_sidebar_search_and_generate_buttons_share_primary_action_style(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'class="sidebar-action-button"' in response.text
+    assert 'id="query-generator-open"' in response.text
+    assert ">위키 생성</button>" in response.text
 
 
 def test_wiki_static_route_serves_space_assets(tmp_path, sample_settings_dict):
@@ -226,7 +243,39 @@ def test_generated_knowledge_page_shows_regenerate_action(tmp_path, sample_setti
 
     assert response.status_code == 200
     assert 'action="/knowledge/keywords/%EC%9A%B4%EC%98%81-%EB%8C%80%EC%8B%9C%EB%B3%B4%EB%93%9C/regenerate"' in response.text
-    assert "다시 생성" in response.text
+    assert "LLM 재작성" in response.text
+
+
+def test_analysis_knowledge_page_shows_llm_regenerate_action(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    result = KnowledgeService(settings).save_analysis(
+        space_key="DEMO",
+        question="운영 대시보드가 설명하는 핵심 지표는 무엇인가?",
+        scope="space",
+        answer="초기 답변입니다.",
+        sources=[
+            {
+                "title": "운영 대시보드",
+                "space_key": "DEMO",
+                "slug": "ops-dashboard-9002",
+                "kind": "page",
+                "href": "/spaces/DEMO/pages/ops-dashboard-9002",
+                "prod_url": "https://prod.example.com/confluence/pages/viewpage.action?pageId=9002",
+            }
+        ],
+    )
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    response = client.get(result["href"])
+
+    assert response.status_code == 200
+    assert "/knowledge/analyses/" in response.text
+    assert "/regenerate" in response.text
+    assert "LLM 재작성" in response.text
 
 
 def test_global_keyword_page_shows_clickable_original_confluence_link(tmp_path, sample_settings_dict):
@@ -322,6 +371,44 @@ def test_keyword_regenerate_route_rebuilds_single_document_from_current_raw_sour
     rendered = client.get("/knowledge/keywords/운영-대시보드")
     assert rendered.status_code == 200
     assert "대시보드 경보 임계치와 알림 지연 원인을 다시 정리합니다." in rendered.text
+
+
+def test_analysis_regenerate_route_rewrites_answer_from_current_raw_sources(tmp_path, sample_settings_dict, monkeypatch):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    service = KnowledgeService(settings)
+    result = service.save_analysis(
+        space_key="DEMO",
+        question="운영 대시보드가 설명하는 핵심 지표는 무엇인가?",
+        scope="space",
+        answer="초기 답변입니다.",
+        sources=[
+            {
+                "title": "운영 대시보드",
+                "space_key": "DEMO",
+                "slug": "ops-dashboard-9002",
+                "kind": "page",
+                "href": "/spaces/DEMO/pages/ops-dashboard-9002",
+                "prod_url": "https://prod.example.com/confluence/pages/viewpage.action?pageId=9002",
+            }
+        ],
+    )
+
+    monkeypatch.setattr(
+        "app.services.knowledge_service.TextLLMClient.answer_question",
+        lambda self, question, contexts: "재작성된 답변입니다.\n\n근거: 현재 운영 지표와 임계치 정책을 다시 설명합니다.",
+    )
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    response = client.post(f'{result["href"]}/regenerate', data={"selected_space": "DEMO"}, follow_redirects=False)
+
+    assert response.status_code == 303
+    rendered = client.get(result["href"])
+    assert rendered.status_code == 200
+    assert "재작성된 답변입니다." in rendered.text
 
 
 def test_query_page_renders_under_canonical_query_route(tmp_path, sample_settings_dict):

@@ -45,6 +45,12 @@
         {% if edit_href %}
         <a class="source-link" href="{{ edit_href }}">편집</a>
         {% endif %}
+        {% if regenerate_href %}
+        <form class="page-action-form" action="{{ regenerate_href }}" method="post">
+          <input type="hidden" name="selected_space" value="{{ regenerate_selected_space or '' }}">
+          <button class="source-link source-button" type="submit">{{ regenerate_label or '다시 생성' }}</button>
+        </form>
+        {% endif %}
         {% if history_href %}
         <a class="source-link" href="{{ history_href }}">문서 이력</a>
         {% endif %}

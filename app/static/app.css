@@ -56,22 +56,11 @@ body {
   grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
-.search-box button {
+.sidebar-action-button {
   background: var(--accent);
   color: white;
   cursor: pointer;
-}
-.sidebar-secondary-button {
-  margin-top: 10px;
   width: 100%;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 11px 12px;
-  background: #fffdf8;
-  color: var(--accent);
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
 }
 .content { padding: 32px; }
 .hero-card, .list-card, .page-card, .graph-card {
@@ -153,6 +142,7 @@ body {
   color: var(--muted);
 }
 .page-actions { display: flex; gap: 12px; }
+.page-action-form { margin: 0; }
 .history-banner {
   display: flex;
   flex-wrap: wrap;
@@ -179,6 +169,11 @@ body {
   color: var(--accent);
   text-decoration: none;
   font-weight: 700;
+}
+.source-button {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
 }
 .wiki-body { line-height: 1.9; font-size: 1.03rem; }
 .history-panel {

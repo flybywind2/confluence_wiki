@@ -805,7 +805,7 @@ class KnowledgeService:
         body: str,
     ) -> dict[str, str]:
         normalized_kind = normalize_knowledge_kind(kind)
-        if normalized_kind not in {"keyword", "analysis", "query", "lint"}:
+        if normalized_kind not in {"entity", "keyword", "analysis", "query", "lint"}:
             raise ValueError("editing is only allowed for user-visible knowledge documents")
         content = body.strip()
         if not content:
@@ -887,7 +887,7 @@ class KnowledgeService:
         selected_space: str | None = None,
     ) -> dict[str, str]:
         normalized_kind = normalize_knowledge_kind(kind)
-        if normalized_kind not in {"keyword", "query", "lint"}:
+        if normalized_kind not in {"entity", "keyword", "analysis", "query", "lint"}:
             raise ValueError("regeneration is only allowed for generated knowledge documents")
 
         global_space = ensure_global_knowledge_space(session)
@@ -918,6 +918,65 @@ class KnowledgeService:
                 selected_space=scoped_space,
             )
 
+        if normalized_kind == "analysis":
+            items = self._load_raw_source_items(session, doc.source_refs)
+            if not items:
+                raise ValueError("knowledge document has no raw sources")
+            existing_body = self._document_body(doc)
+            question = self._analysis_question(existing_body, doc.title)
+            scope = self._analysis_scope(existing_body, scoped_space)
+            answer = self.text_client.answer_question(
+                question,
+                [
+                    {
+                        "title": item["title"],
+                        "space_key": item["space_key"],
+                        "slug": item["slug"],
+                        "kind": "page",
+                        "href": item["href"],
+                        "excerpt": str(item.get("fact_card") or item.get("body_excerpt") or item.get("summary") or "")[:1200],
+                    }
+                    for item in items
+                ],
+            )
+            rewritten_body = "\n".join(
+                [
+                    f"# {doc.title}",
+                    "",
+                    "이 문서는 assistant 질문 결과를 위키에 저장한 분석 문서입니다.",
+                    "",
+                    "## 질문",
+                    "",
+                    question,
+                    "",
+                    "## 범위",
+                    "",
+                    scope,
+                    "",
+                    "## 재작성 시각",
+                    "",
+                    datetime.now().isoformat(),
+                    "",
+                    "## 답변",
+                    "",
+                    answer.strip() or "재작성된 답변을 생성하지 못했습니다.",
+                    "",
+                    "## 참고 문서",
+                    "",
+                    *[self._render_source_reference(item) for item in items],
+                ]
+            ).strip()
+            regenerated_doc = self._upsert_document(
+                session=session,
+                space=global_space,
+                kind="analysis",
+                slug=doc.slug,
+                title=doc.title,
+                summary=(answer.splitlines()[0][:180] if answer.strip() else question[:180]),
+                body=rewritten_body,
+                source_refs=doc.source_refs or "\n".join(page_link(item["space_key"], item["slug"], item["title"]) for item in items),
+            )
+
         if normalized_kind == "lint":
             from app.services.lint_service import LintService
 
@@ -927,7 +986,7 @@ class KnowledgeService:
             )
             if regenerated_doc is None:
                 raise ValueError("lint document could not be regenerated")
-        elif normalized_kind == "keyword":
+        elif normalized_kind in {"entity", "keyword"}:
             items = self._load_raw_source_items(session, doc.source_refs)
             if not items:
                 raise ValueError("knowledge document has no raw sources")
@@ -944,7 +1003,7 @@ class KnowledgeService:
             regenerated_doc = self._upsert_document(
                 session=session,
                 space=global_space,
-                kind="keyword",
+                kind=normalized_kind,
                 slug=doc.slug,
                 title=rebuilt["title"],
                 summary=rebuilt["summary"],
@@ -976,6 +1035,25 @@ class KnowledgeService:
             "title": regenerated_doc.title,
             "href": knowledge_href(regenerated_doc.kind, regenerated_doc.slug),
         }
+
+    @classmethod
+    def _analysis_question(cls, markdown: str, title: str) -> str:
+        question = cls._extract_markdown_section(markdown, ("## 질문",)).strip()
+        if question:
+            return question
+        normalized_title = str(title or "").strip()
+        if normalized_title.startswith("분석:"):
+            fallback = normalized_title.split(":", 1)[1].strip()
+            if fallback:
+                return fallback
+        return normalized_title or "이 분석 문서의 질문"
+
+    @classmethod
+    def _analysis_scope(cls, markdown: str, selected_space: str | None) -> str:
+        scope = cls._extract_markdown_section(markdown, ("## 범위",)).strip()
+        if scope:
+            return scope
+        return "space" if selected_space and selected_space not in {"", "all"} else "global"
 
     def list_documents(self, session, space_id: int | None = None) -> list[KnowledgeDocument]:
         statement = select(KnowledgeDocument).order_by(KnowledgeDocument.updated_at.desc())
