@@ -6,6 +6,7 @@ from threading import Event
 from app.core.config import Settings
 from app.services.knowledge_service import KnowledgeService
 from app.services.query_jobs import QueryJobManager
+from app.services.sync_service import SyncResult, SyncService
 
 
 def _wait_until(predicate, timeout: float = 2.0) -> None:
@@ -109,3 +110,30 @@ def test_query_job_manager_runs_regenerate_job(sample_settings_dict, monkeypatch
     assert finished["slug"] == "운영-대시보드"
     assert finished["href"] == "/knowledge/keywords/운영-대시보드"
     assert called == [("keyword", "운영-대시보드", "DEMO")]
+
+
+def test_query_job_manager_runs_bootstrap_job_with_progress(sample_settings_dict, monkeypatch):
+    settings = Settings.model_validate(sample_settings_dict)
+    progress_messages: list[str] = []
+
+    async def fake_run_bootstrap_async(self, space_key: str, root_page_id: str, progress_callback=None):
+        if progress_callback is not None:
+            progress_callback(15, "하위 페이지 트리를 확인하는 중입니다.")
+            progress_callback(75, "페이지를 동기화하는 중입니다.")
+        progress_messages.append(f"{space_key}:{root_page_id}")
+        return SyncResult(mode="bootstrap", space_key=space_key, processed_pages=4, processed_assets=0)
+
+    monkeypatch.setattr(SyncService, "run_bootstrap_async", fake_run_bootstrap_async)
+
+    manager = QueryJobManager(settings)
+    snapshot = manager.start_bootstrap_job(space_key="DEMO", root_page_id="9001")
+
+    _wait_until(lambda: (manager.get_job(snapshot["id"]) or {}).get("status") == "completed")
+
+    finished = manager.get_job(snapshot["id"])
+    assert finished is not None
+    assert finished["job_type"] == "bootstrap"
+    assert finished["space_key"] == "DEMO"
+    assert finished["message"] == "Bootstrap이 완료되었습니다."
+    assert any(event["message"] == "페이지를 동기화하는 중입니다." for event in finished["events"])
+    assert progress_messages == ["DEMO:9001"]

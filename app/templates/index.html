@@ -1,7 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Confluence Wiki{% endblock %}
 {% block content %}
-<div class="{% if show_home_rail %}home-dashboard-shell{% endif %}">
 <div class="{% if show_home_rail %}home-layout home-dashboard{% endif %}">
   <div class="{% if show_home_rail %}home-primary{% endif %}">
     <section class="hero-card {% if show_home_rail %}home-dashboard-hero{% endif %}">
@@ -122,6 +121,5 @@
     </section>
   </aside>
   {% endif %}
-</div>
 </div>
 {% endblock %}

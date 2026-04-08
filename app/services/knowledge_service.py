@@ -784,10 +784,17 @@ class KnowledgeService:
             "href": knowledge_href(doc.kind, doc.slug),
         }
 
-    def update_document_body(self, space_key: str, kind: str, slug: str, body: str) -> dict[str, str]:
+    def update_document_body(
+        self,
+        space_key: str,
+        kind: str,
+        slug: str,
+        body: str,
+        title: str | None = None,
+    ) -> dict[str, str]:
         session = self.session_factory()
         try:
-            result = self.update_document_body_with_session(session, space_key, kind, slug, body)
+            result = self.update_document_body_with_session(session, space_key, kind, slug, body, title=title)
             session.commit()
             return result
         except Exception:
@@ -803,6 +810,7 @@ class KnowledgeService:
         kind: str,
         slug: str,
         body: str,
+        title: str | None = None,
     ) -> dict[str, str]:
         normalized_kind = normalize_knowledge_kind(kind)
         if normalized_kind not in {"entity", "keyword", "analysis", "query", "lint"}:
@@ -828,12 +836,17 @@ class KnowledgeService:
             )
         if doc is None:
             raise ValueError("knowledge document not found")
+        document_title = (title or doc.title or "").strip()
+        if not document_title:
+            raise ValueError("title is required")
 
         markdown_path = self.settings.wiki_root / doc.markdown_path
         frontmatter, _existing_body = read_markdown_document(markdown_path)
         updated_at = datetime.now()
         summary = self.text_client.summarize(content) or self._first_line(content)
-        frontmatter["title"] = doc.title
+        doc.title = document_title
+        frontmatter["title"] = document_title
+        frontmatter["aliases"] = [document_title]
         frontmatter["updated_at"] = updated_at.isoformat()
         write_markdown_file(markdown_path, frontmatter, content)
 

@@ -51,6 +51,8 @@ def test_admin_can_open_operations_page(tmp_path, sample_settings_dict):
     assert "Bootstrap 대상" in response.text
     assert "증분 동기화 스케줄" in response.text
     assert "외부 스케줄러" in response.text
+    assert 'id="admin-sync-jobs"' in response.text
+    assert 'data-admin-sync-trigger="true"' in response.text
 
 
 def test_admin_can_register_space_and_save_schedule(tmp_path, sample_settings_dict):

@@ -90,7 +90,7 @@ def test_home_page_renders_summary_rail_without_quick_generation_panel(tmp_path,
     assert 'data-query-seed="' not in response.text
     assert "/knowledge/keywords/" in response.text
     assert "/spaces/DEMO/pages/" in response.text
-    assert 'class="home-dashboard-shell"' in response.text
+    assert 'class="home-dashboard-shell"' not in response.text
     assert 'class="hero-card home-dashboard-hero"' in response.text
     assert '<div class="home-primary">\n    <section class="hero-card home-dashboard-hero">' in response.text
     assert 'class="list-card dashboard-list-card"' in response.text
@@ -463,6 +463,8 @@ def test_knowledge_edit_form_renders_markdown_body(tmp_path, sample_settings_dic
     response = client.get("/knowledge/keywords/운영-대시보드/edit")
 
     assert response.status_code == 200
+    assert 'name="title"' in response.text
+    assert 'value="운영 대시보드"' in response.text
     assert "<textarea" in response.text
     assert "운영 대시보드" in response.text
 
@@ -475,11 +477,12 @@ def test_knowledge_edit_save_updates_rendered_content(tmp_path, sample_settings_
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
     _login(client, "editor")
+    new_title = "운영 대시보드 재정리"
     new_body = "# 운영 대시보드\n\n수정된 본문입니다.\n\n- 새 메모"
 
     response = client.post(
         "/knowledge/keywords/운영-대시보드/edit",
-        data={"body": new_body},
+        data={"title": new_title, "body": new_body},
         follow_redirects=False,
     )
 
@@ -488,9 +491,14 @@ def test_knowledge_edit_save_updates_rendered_content(tmp_path, sample_settings_
 
     rendered = client.get("/knowledge/keywords/운영-대시보드")
     assert rendered.status_code == 200
+    assert "운영 대시보드 재정리" in rendered.text
     assert "수정된 본문입니다." in rendered.text
 
     keyword_file = tmp_path / "wiki" / "global" / "knowledge" / "keywords" / "운영-대시보드.md"
+    frontmatter, body = read_markdown_document(keyword_file)
+    assert frontmatter["title"] == new_title
+    assert frontmatter["aliases"] == [new_title]
+    assert "수정된 본문입니다." in body
     assert "수정된 본문입니다." in keyword_file.read_text(encoding="utf-8")
 
 

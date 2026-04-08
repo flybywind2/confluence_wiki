@@ -47,6 +47,39 @@
     </div>
   </section>
 
+  <section class="history-panel" id="admin-sync-jobs">
+    <div class="section-header">
+      <h2>실행 진행 상황</h2>
+      <span id="admin-sync-queue-summary">현재 대기열이 없습니다.</span>
+    </div>
+    <div class="admin-sync-jobs-grid">
+      <section class="list-card admin-sync-jobs-card">
+        <div class="section-header">
+          <h3>실행 중</h3>
+        </div>
+        <ul class="page-list compact-page-list" id="admin-sync-running-list">
+          <li class="empty-state">실행 중인 작업이 없습니다.</li>
+        </ul>
+      </section>
+      <section class="list-card admin-sync-jobs-card">
+        <div class="section-header">
+          <h3>대기열</h3>
+        </div>
+        <ul class="page-list compact-page-list" id="admin-sync-queued-list">
+          <li class="empty-state">대기 중인 작업이 없습니다.</li>
+        </ul>
+      </section>
+      <section class="list-card admin-sync-jobs-card">
+        <div class="section-header">
+          <h3>최근 작업</h3>
+        </div>
+        <ul class="page-list compact-page-list" id="admin-sync-recent-list">
+          <li class="empty-state">최근 작업이 없습니다.</li>
+        </ul>
+      </section>
+    </div>
+  </section>
+
   <section class="history-panel">
     <div class="section-header">
       <h2>공간 등록</h2>
@@ -107,10 +140,10 @@
           </div>
         </form>
         <div class="admin-inline-actions">
-          <form class="page-action-form" action="/admin/spaces/{{ row.space_key }}/bootstrap" method="post">
+          <form class="page-action-form" action="/admin/spaces/{{ row.space_key }}/bootstrap" method="post" data-admin-sync-trigger="true" data-job-mode="bootstrap" data-space-key="{{ row.space_key }}" data-root-page-id="{{ row.root_page_id }}">
             <button type="submit" class="hero-link">Bootstrap 실행</button>
           </form>
-          <form class="page-action-form" action="/admin/spaces/{{ row.space_key }}/sync" method="post">
+          <form class="page-action-form" action="/admin/spaces/{{ row.space_key }}/sync" method="post" data-admin-sync-trigger="true" data-job-mode="incremental" data-space-key="{{ row.space_key }}">
             <button type="submit" class="source-link source-button">증분 동기화 실행</button>
           </form>
         </div>
@@ -180,4 +213,5 @@
     </div>
   </section>
 </article>
+<script src="/static/admin-operations.js"></script>
 {% endblock %}

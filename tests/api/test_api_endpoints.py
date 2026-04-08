@@ -391,3 +391,63 @@ def test_regenerate_job_api_starts_knowledge_job(tmp_path, sample_settings_dict)
     assert payload["job_type"] == "regenerate"
     assert payload["kind"] == "keyword"
     assert payload["slug"] == "운영-대시보드"
+
+
+def test_admin_sync_job_api_starts_bootstrap_job(tmp_path, sample_settings_dict):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+        }
+    )
+    test_app = create_app(settings=settings, allow_test_fallback=False)
+    seed_demo_content(settings=settings)
+
+    class FakeQueryJobs:
+        def start_sync_job(self, *, mode: str, space_key: str, root_page_id: str | None = None):
+            return {
+                "id": "sync-1",
+                "query": "DEMO Bootstrap",
+                "job_type": mode,
+                "space_key": space_key,
+                "page_id": root_page_id,
+                "status": "queued",
+                "message": "대기열에 추가되었습니다.",
+                "progress": 0,
+            }
+
+        def list_jobs(self, *, job_types=None, recent_limit: int = 8):
+            return {
+                "running": None,
+                "queued": [
+                    {
+                        "id": "sync-1",
+                        "query": "DEMO Bootstrap",
+                        "job_type": "bootstrap",
+                        "space_key": "DEMO",
+                        "status": "queued",
+                        "message": "대기열에 추가되었습니다.",
+                        "progress": 0,
+                    }
+                ],
+                "recent": [],
+                "counts": {"running": 0, "queued": 1, "recent": 0, "total_active": 1},
+            }
+
+    test_app.state.query_jobs = FakeQueryJobs()
+    client = TestClient(test_app)
+    _login(client, "admin")
+
+    create_response = client.post(
+        "/api/query-jobs/sync",
+        json={"mode": "bootstrap", "space_key": "DEMO", "root_page_id": "9001"},
+    )
+    list_response = client.get("/api/query-jobs", params={"types": "bootstrap,incremental"})
+
+    assert create_response.status_code == 202
+    assert create_response.json()["job_type"] == "bootstrap"
+    assert create_response.json()["space_key"] == "DEMO"
+    assert list_response.status_code == 200
+    assert list_response.json()["queued"][0]["job_type"] == "bootstrap"

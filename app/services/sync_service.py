@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from urllib.parse import unquote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
@@ -35,6 +36,7 @@ from app.services.sync_window import build_day_before_yesterday_window
 from app.services.wiki_writer import write_history_markdown, write_page_markdown
 
 logger = logging.getLogger(__name__)
+ProgressCallback = Callable[[int, str], None]
 
 
 @dataclass
@@ -83,20 +85,49 @@ class SyncService:
     def run_incremental(self, space_key: str, now: datetime | None = None) -> SyncResult:
         return asyncio.run(self.run_incremental_async(space_key, now))
 
-    async def run_bootstrap_async(self, space_key: str, root_page_id: str) -> SyncResult:
-        return await self._run_bootstrap(space_key, root_page_id)
+    async def run_bootstrap_async(
+        self,
+        space_key: str,
+        root_page_id: str,
+        progress_callback: ProgressCallback | None = None,
+    ) -> SyncResult:
+        if progress_callback is None:
+            return await self._run_bootstrap(space_key, root_page_id)
+        return await self._run_bootstrap(space_key, root_page_id, progress_callback)
 
-    async def run_incremental_async(self, space_key: str, now: datetime | None = None) -> SyncResult:
-        return await self._run_incremental(space_key, now)
+    async def run_incremental_async(
+        self,
+        space_key: str,
+        now: datetime | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> SyncResult:
+        if progress_callback is None:
+            return await self._run_incremental(space_key, now)
+        return await self._run_incremental(space_key, now, progress_callback)
 
-    async def _run_bootstrap(self, space_key: str, root_page_id: str) -> SyncResult:
+    async def _run_bootstrap(
+        self,
+        space_key: str,
+        root_page_id: str,
+        progress_callback: ProgressCallback | None = None,
+    ) -> SyncResult:
+        if progress_callback:
+            progress_callback(5, "하위 페이지 트리를 확인하는 중입니다.")
         if hasattr(self.confluence_client, "fetch_page_tree"):
             descendants = await self.confluence_client.fetch_page_tree(root_page_id)
         else:
             descendants = await self.confluence_client.fetch_descendant_pages(root_page_id)
         page_ids = [root_page_id, *[item["id"] for item in descendants if item["id"] != root_page_id]]
         logger.info("bootstrap start space=%s root_page_id=%s pages=%s", space_key, root_page_id, len(page_ids))
-        result = await self._sync_pages(space_key=space_key, page_ids=page_ids, mode="bootstrap", root_page_id=root_page_id)
+        if progress_callback:
+            progress_callback(15, f"Bootstrap 대상 {len(page_ids)}건을 확인했습니다.")
+        result = await self._sync_pages(
+            space_key=space_key,
+            page_ids=page_ids,
+            mode="bootstrap",
+            root_page_id=root_page_id,
+            progress_callback=progress_callback,
+        )
         session = self.session_factory()
         try:
             space = session.scalar(select(Space).where(Space.space_key == space_key))
@@ -108,7 +139,14 @@ class SyncService:
             session.close()
         return result
 
-    async def _run_incremental(self, space_key: str, now: datetime | None) -> SyncResult:
+    async def _run_incremental(
+        self,
+        space_key: str,
+        now: datetime | None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> SyncResult:
+        if progress_callback:
+            progress_callback(5, "증분 변경 범위를 계산하는 중입니다.")
         timezone = ZoneInfo(self.settings.app_timezone)
         effective_now = now or datetime.now(tz=timezone)
         start, end = build_day_before_yesterday_window(effective_now)
@@ -122,12 +160,15 @@ class SyncService:
             end.isoformat(),
             len(page_ids),
         )
+        if progress_callback:
+            progress_callback(15, f"증분 대상 {len(page_ids)}건을 확인했습니다.")
         result = await self._sync_pages(
             space_key=space_key,
             page_ids=page_ids,
             mode="incremental",
             root_page_id=None,
             window_label=f"{start.isoformat()} ~ {end.isoformat()}",
+            progress_callback=progress_callback,
         )
         session = self.session_factory()
         try:
@@ -146,6 +187,7 @@ class SyncService:
         mode: str,
         root_page_id: str | None,
         window_label: str | None = None,
+        progress_callback: ProgressCallback | None = None,
     ) -> SyncResult:
         unique_page_ids = list(dict.fromkeys(page_ids))
         slug_lookup = {
@@ -177,6 +219,9 @@ class SyncService:
             page_records: dict[str, Page] = {}
             documents_for_index: list[dict[str, str]] = []
             for index, raw_page in enumerate(raw_pages, start=1):
+                if progress_callback and raw_pages:
+                    progress = 20 + int(((index - 1) / max(len(raw_pages), 1)) * 65)
+                    progress_callback(progress, f"{index}/{len(raw_pages)} 페이지를 처리하는 중입니다: {raw_page['title']}")
                 logger.info(
                     "processing page %s/%s id=%s title=%s",
                     index,
@@ -396,6 +441,8 @@ class SyncService:
             )
             session.execute(delete(PageLink).where(PageLink.source_page_id.in_([page.id for page in page_records.values()])))
             session.flush()
+            if progress_callback:
+                progress_callback(92, "인덱스와 링크를 재구성하는 중입니다.")
 
             edges: list[dict] = []
             known_pages_by_confluence_id = {
@@ -450,6 +497,8 @@ class SyncService:
             sync_run.processed_assets = processed_assets
             sync_run.finished_at = self._utcnow()
             session.commit()
+            if progress_callback:
+                progress_callback(100, "동기화가 완료되었습니다.")
             logger.info(
                 "sync complete mode=%s space=%s pages=%s assets=%s",
                 mode,

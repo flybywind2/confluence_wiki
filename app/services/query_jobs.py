@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from threading import Lock, Thread
@@ -8,6 +9,7 @@ import uuid
 
 from app.core.config import Settings
 from app.services.knowledge_service import KnowledgeService
+from app.services.sync_service import SyncService
 
 ProgressCallback = Callable[[int, str], None]
 
@@ -20,6 +22,8 @@ class QueryJob:
     job_type: str = "query"
     kind: str | None = None
     slug: str | None = None
+    space_key: str | None = None
+    page_id: str | None = None
     status: str = "queued"
     message: str = "대기 중입니다."
     progress: int = 0
@@ -101,6 +105,49 @@ class QueryJobManager:
             )
         return self._enqueue_job(job)
 
+    def start_sync_job(
+        self,
+        *,
+        mode: str,
+        space_key: str,
+        root_page_id: str | None = None,
+    ) -> dict[str, object]:
+        normalized_mode = str(mode or "").strip().lower()
+        normalized_space_key = str(space_key or "").strip()
+        normalized_page_id = str(root_page_id or "").strip() or None
+        if normalized_mode not in {"bootstrap", "incremental"}:
+            raise ValueError("mode must be bootstrap or incremental")
+        if not normalized_space_key:
+            raise ValueError("space_key is required")
+        if normalized_mode == "bootstrap" and not normalized_page_id:
+            raise ValueError("root_page_id is required for bootstrap")
+
+        self._prune_old_jobs()
+        with self._lock:
+            existing = self._find_active_job_locked(
+                job_type=normalized_mode,
+                space_key=normalized_space_key,
+            )
+            if existing is not None:
+                return self._snapshot_locked(existing)
+            display_name = f"{normalized_space_key} {'Bootstrap' if normalized_mode == 'bootstrap' else 'Incremental'}"
+            job = QueryJob(
+                id=uuid.uuid4().hex,
+                query=display_name,
+                selected_space=normalized_space_key,
+                job_type=normalized_mode,
+                space_key=normalized_space_key,
+                page_id=normalized_page_id,
+                message="대기열에 추가되었습니다.",
+            )
+        return self._enqueue_job(job)
+
+    def start_bootstrap_job(self, *, space_key: str, root_page_id: str) -> dict[str, object]:
+        return self.start_sync_job(mode="bootstrap", space_key=space_key, root_page_id=root_page_id)
+
+    def start_incremental_job(self, *, space_key: str) -> dict[str, object]:
+        return self.start_sync_job(mode="incremental", space_key=space_key)
+
     def get_job(self, job_id: str) -> dict[str, object] | None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -108,24 +155,24 @@ class QueryJobManager:
                 return None
             return self._snapshot_locked(job)
 
-    def list_jobs(self, *, recent_limit: int = 8) -> dict[str, object]:
+    def list_jobs(self, *, recent_limit: int = 8, job_types: set[str] | None = None) -> dict[str, object]:
         with self._lock:
             running = None
             if self._running_job_id:
                 running_job = self._jobs.get(self._running_job_id)
-                if running_job is not None:
+                if running_job is not None and self._job_visible(running_job, job_types):
                     running = self._snapshot_locked(running_job)
 
             queued = [
                 self._snapshot_locked(job)
                 for job_id in self._pending_job_ids
-                if (job := self._jobs.get(job_id)) is not None
+                if (job := self._jobs.get(job_id)) is not None and self._job_visible(job, job_types)
             ]
             recent_jobs = sorted(
                 (
                     self._snapshot_locked(job)
                     for job in self._jobs.values()
-                    if job.status in {"completed", "failed"}
+                    if job.status in {"completed", "failed"} and self._job_visible(job, job_types)
                 ),
                 key=lambda item: item["updated_at"],
                 reverse=True,
@@ -181,6 +228,9 @@ class QueryJobManager:
     def _run_job(self, job: QueryJob) -> None:
         if job.job_type == "regenerate":
             self._run_regenerate_job(job)
+            return
+        if job.job_type in {"bootstrap", "incremental"}:
+            self._run_sync_job(job)
             return
         self._run_query_job(job)
 
@@ -243,6 +293,57 @@ class QueryJobManager:
             error=None,
         )
 
+    def _run_sync_job(self, job: QueryJob) -> None:
+        is_bootstrap = job.job_type == "bootstrap"
+        start_message = "Bootstrap을 준비하는 중입니다." if is_bootstrap else "증분 동기화를 준비하는 중입니다."
+        completed_message = "Bootstrap이 완료되었습니다." if is_bootstrap else "증분 동기화가 완료되었습니다."
+        failed_message = "Bootstrap에 실패했습니다." if is_bootstrap else "증분 동기화에 실패했습니다."
+        self._update(job.id, status="running", progress=5, message=start_message)
+        service = SyncService(self.settings)
+        try:
+            if is_bootstrap:
+                result = asyncio.run(
+                    service.run_bootstrap_async(
+                        space_key=str(job.space_key or ""),
+                        root_page_id=str(job.page_id or ""),
+                        progress_callback=lambda progress, message: self._update(
+                            job.id,
+                            status="running",
+                            progress=progress,
+                            message=message,
+                        ),
+                    )
+                )
+            else:
+                result = asyncio.run(
+                    service.run_incremental_async(
+                        space_key=str(job.space_key or ""),
+                        progress_callback=lambda progress, message: self._update(
+                            job.id,
+                            status="running",
+                            progress=progress,
+                            message=message,
+                        ),
+                    )
+                )
+        except Exception as exc:
+            self._update(
+                job.id,
+                status="failed",
+                progress=100,
+                message=failed_message,
+                error=str(exc),
+            )
+            return
+        self._update(
+            job.id,
+            status="completed",
+            progress=100,
+            message=completed_message,
+            href=None,
+            error=None,
+        )
+
     def _update(
         self,
         job_id: str,
@@ -279,21 +380,27 @@ class QueryJobManager:
         kind: str | None = None,
         slug: str | None = None,
         selected_space: str | None = None,
+        space_key: str | None = None,
     ) -> QueryJob | None:
         normalized_query = (query or "").casefold()
         normalized_kind = kind or None
         normalized_slug = slug or None
         normalized_space = selected_space or None
+        normalized_space_key = space_key or None
         for job in self._jobs.values():
             if job.status not in {"queued", "running"}:
                 continue
             if job.job_type != job_type:
                 continue
-            if (job.selected_space or None) != normalized_space:
-                continue
             if job_type == "query" and job.query.casefold() == normalized_query:
+                if (job.selected_space or None) != normalized_space:
+                    continue
                 return job
             if job_type == "regenerate" and (job.kind or None) == normalized_kind and (job.slug or None) == normalized_slug:
+                if (job.selected_space or None) != normalized_space:
+                    continue
+                return job
+            if job_type in {"bootstrap", "incremental"} and (job.space_key or None) == normalized_space_key:
                 return job
         return None
 
@@ -315,7 +422,19 @@ class QueryJobManager:
 
     @staticmethod
     def _job_type_label(job_type: str) -> str:
-        return "LLM 재작성" if job_type == "regenerate" else "위키 생성"
+        if job_type == "regenerate":
+            return "LLM 재작성"
+        if job_type == "bootstrap":
+            return "Bootstrap"
+        if job_type == "incremental":
+            return "증분 동기화"
+        return "위키 생성"
+
+    @staticmethod
+    def _job_visible(job: QueryJob, job_types: set[str] | None) -> bool:
+        if not job_types:
+            return True
+        return job.job_type in job_types
 
     @staticmethod
     def _event(*, progress: int, status: str, message: str) -> dict[str, object]:
@@ -336,6 +455,8 @@ class QueryJobManager:
             "job_type_label": QueryJobManager._job_type_label(job.job_type),
             "kind": job.kind,
             "slug": job.slug,
+            "space_key": job.space_key,
+            "page_id": job.page_id,
             "status": job.status,
             "message": job.message,
             "progress": job.progress,

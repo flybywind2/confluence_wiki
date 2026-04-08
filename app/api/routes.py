@@ -1322,6 +1322,7 @@ async def knowledge_edit_form(request: Request, kind: str, slug: str, space: str
                 "selected_space": space or "all",
                 "selected_space_name": space_name_by_key.get(space or "", space or "전체 Space") if space and space != "all" else "전체 Space",
                 "page_title": display_title,
+                "document_title": doc.title,
                 "page_kind": normalized_kind,
                 "body_markdown": body_markdown,
                 "form_action": f"/knowledge/{knowledge_segment(normalized_kind)}/{slug}/edit",
@@ -1339,13 +1340,20 @@ async def knowledge_edit_save(
     request: Request,
     kind: str,
     slug: str,
+    title: str = Form(...),
     body: str = Form(...),
     selected_space: str = Form(default=""),
 ) -> RedirectResponse:
     session = _session_factory(request)()
     try:
         _ensure_api_role(session, request, "editor")
-        result = KnowledgeService(_settings(request)).update_document_body(space_key=selected_space or "GLOBAL", kind=kind, slug=slug, body=body)
+        result = KnowledgeService(_settings(request)).update_document_body(
+            space_key=selected_space or "GLOBAL",
+            kind=kind,
+            slug=slug,
+            title=title,
+            body=body,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -1386,12 +1394,19 @@ async def knowledge_edit_save_legacy(
     space_key: str,
     kind: str,
     slug: str,
+    title: str = Form(...),
     body: str = Form(...),
 ) -> RedirectResponse:
     session = _session_factory(request)()
     try:
         _ensure_api_role(session, request, "editor")
-        result = KnowledgeService(_settings(request)).update_document_body(space_key=space_key, kind=kind, slug=slug, body=body)
+        result = KnowledgeService(_settings(request)).update_document_body(
+            space_key=space_key,
+            kind=kind,
+            slug=slug,
+            title=title,
+            body=body,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:
@@ -1635,14 +1650,42 @@ async def api_start_regenerate_job(request: Request, payload: dict) -> JSONRespo
     return JSONResponse(snapshot, status_code=202)
 
 
+@router.post("/api/query-jobs/sync")
+async def api_start_sync_job(request: Request, payload: dict) -> JSONResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+    finally:
+        session.close()
+    mode = str(payload.get("mode") or "").strip().lower()
+    space_key = str(payload.get("space_key") or payload.get("space") or "").strip()
+    root_page_id = str(payload.get("root_page_id") or payload.get("page_id") or "").strip() or None
+    try:
+        snapshot = _query_jobs(request).start_sync_job(
+            mode=mode,
+            space_key=space_key,
+            root_page_id=root_page_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(snapshot, status_code=202)
+
+
 @router.get("/api/query-jobs")
-async def api_query_job_queue(request: Request) -> dict:
+async def api_query_job_queue(request: Request, types: str | None = Query(default=None)) -> dict:
     session = _session_factory(request)()
     try:
         _ensure_api_role(session, request, "viewer")
     finally:
         session.close()
-    return _query_jobs(request).list_jobs()
+    job_types = {item.strip() for item in str(types or "").split(",") if item.strip()} or None
+    manager = _query_jobs(request)
+    if job_types is None:
+        return manager.list_jobs()
+    try:
+        return manager.list_jobs(job_types=job_types)
+    except TypeError:
+        return manager.list_jobs()
 
 
 @router.get("/api/query-jobs/{job_id}")

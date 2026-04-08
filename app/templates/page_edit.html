@@ -30,6 +30,16 @@
   {% endif %}
   <form class="editor-form" action="{{ form_action }}" method="post">
     <input type="hidden" name="selected_space" value="{{ selected_space or '' }}" />
+    <label class="editor-label" for="knowledge-title">지식 제목</label>
+    <input
+      id="knowledge-title"
+      class="editor-title-input"
+      type="text"
+      name="title"
+      value="{{ document_title }}"
+      maxlength="200"
+      required
+    />
     <textarea class="editor-textarea" name="body" rows="24" spellcheck="false">{{ body_markdown }}</textarea>
     <div class="editor-actions">
       <a class="source-link" href="{{ cancel_href }}">취소</a>

@@ -210,7 +210,7 @@
   };
 
   const fetchQueueOverview = async () => {
-    const response = await fetch("/api/query-jobs");
+    const response = await fetch("/api/query-jobs?types=query,regenerate");
     const overview = await response.json();
     if (!response.ok) {
       throw new Error(overview.detail || "대기열을 불러오지 못했습니다.");
