@@ -1,5 +1,8 @@
+import json
+
 from app.core.config import Settings
 from app.demo_seed import seed_demo_content
+from app.llm.text_client import TextLLMClient
 from app.services.knowledge_service import KnowledgeService
 from app.services.knowledge_service import PhraseToken
 from app.services.sync_service import SyncService
@@ -262,6 +265,191 @@ def test_ensure_keyword_sections_preserves_rich_generated_key_facts_when_present
 
     assert "- DS Assistant는 권한 캐시 만료 시 재시도 로직이 없습니다." in updated
     assert "- 포털 검색 API timeout이 2초라서 응답 지연이 커집니다." in updated
+
+
+def test_rebuild_global_uses_llm_fact_cards_and_propagates_body_excerpt(tmp_path, sample_settings_dict, monkeypatch):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    sample_settings_dict["DATABASE_URL"] = f"sqlite:///{tmp_path / 'app.db'}"
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+    service = KnowledgeService(settings)
+    session = service.session_factory()
+    summarize_calls: list[dict[str, object]] = []
+    update_calls: list[dict[str, object]] = []
+    try:
+        monkeypatch.setattr(
+            service.text_client,
+            "summarize_fact_card",
+            lambda title, text, prefer_llm=True: summarize_calls.append(
+                {"title": title, "prefer_llm": prefer_llm, "text": text}
+            )
+            or "",
+        )
+        monkeypatch.setattr(service.text_client, "propose_topics_for_document", lambda **kwargs: ["운영"])
+        monkeypatch.setattr(service.text_client, "classify_topic_type", lambda **kwargs: "concept")
+        monkeypatch.setattr(
+            service.text_client,
+            "update_topic_page",
+            lambda **kwargs: update_calls.append(kwargs)
+            or "\n".join(
+                [
+                    "# 운영",
+                    "",
+                    "## 개요",
+                    "",
+                    "편집자 갱신 결과",
+                    "",
+                    "## 핵심 사실",
+                    "",
+                    "- 운영 관련 사실",
+                    "",
+                    "## 관련 문서",
+                    "",
+                    "- 테스트",
+                    "",
+                    "## 관련 주제",
+                    "",
+                    "- 없음",
+                    "",
+                    "## 원문 근거",
+                    "",
+                    "- 테스트",
+                ]
+            ),
+        )
+
+        service.rebuild_global_with_session(session)
+    finally:
+        session.rollback()
+        session.close()
+
+    assert summarize_calls
+    assert all(call["prefer_llm"] is True for call in summarize_calls)
+    assert update_calls
+    evidence_items = update_calls[0]["new_evidence"]
+    assert any(str(item.get("body_excerpt") or "").strip() for item in evidence_items)
+    assert all(str(item.get("fact_card") or "").strip() for item in evidence_items)
+
+
+def test_load_raw_source_items_prefers_llm_fact_cards_and_falls_back_to_body_excerpt(
+    tmp_path,
+    sample_settings_dict,
+    monkeypatch,
+):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    sample_settings_dict["DATABASE_URL"] = f"sqlite:///{tmp_path / 'app.db'}"
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+    service = KnowledgeService(settings)
+    session = service.session_factory()
+    summarize_calls: list[bool] = []
+    try:
+        monkeypatch.setattr(
+            service.text_client,
+            "summarize_fact_card",
+            lambda title, text, prefer_llm=True: summarize_calls.append(prefer_llm) or "",
+        )
+        items = service._load_raw_source_items(
+            session,
+            "[[spaces/DEMO/pages/demo-home-9001|Confluence Wiki Demo 홈]]",
+        )
+    finally:
+        session.close()
+
+    assert summarize_calls == [True]
+    assert items
+    assert str(items[0]["body_excerpt"]).strip()
+    assert str(items[0]["fact_card"]).strip()
+
+
+def test_update_topic_page_payload_includes_body_excerpt(sample_settings_dict, monkeypatch):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "OPENAI_API_KEY": "test-key",
+            "LLM_BASE_URL": "http://example.invalid/v1",
+            "LLM_MODEL": "unit-test-model",
+        }
+    )
+    client = TextLLMClient(settings)
+    captured: dict[str, object] = {}
+
+    class _FakeCompletions:
+        def create(self, *, model, messages):
+            captured["model"] = model
+            captured["messages"] = messages
+            return type(
+                "Completion",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {"message": type("Message", (), {"content": "# 주제\n\n## 개요\n\n본문"})()},
+                        )
+                    ]
+                },
+            )()
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    monkeypatch.setattr(client, "_client", lambda: _FakeClient())
+
+    client.update_topic_page(
+        space_key="GLOBAL",
+        topic="AI Portal",
+        topic_type="concept",
+        existing_content="",
+        new_evidence=[
+            {
+                "title": "AI Portal 운영 점검",
+                "summary": "인증과 장애 대응을 정리합니다.",
+                "fact_card": "- 인증 흐름을 정리했습니다.",
+                "body_excerpt": "AI Portal 인증 흐름과 장애 대응 절차를 정리합니다. 관리자 승인 없이 토큰 재발급이 되지 않습니다.",
+            }
+        ],
+        related_topics=["DS Assistant"],
+        wiki_state="Wiki topics: AI Portal",
+        prefer_llm=True,
+    )
+
+    payload = json.loads(str(captured["messages"][1]["content"]))
+    assert payload["new_evidence"][0]["body_excerpt"].startswith("AI Portal 인증 흐름과 장애 대응 절차")
+
+
+def test_fallback_update_topic_page_uses_body_excerpt_when_summary_is_weak(sample_settings_dict):
+    settings = Settings.model_validate(sample_settings_dict)
+    client = TextLLMClient(settings)
+
+    updated = client.update_topic_page(
+        space_key="GLOBAL",
+        topic="AI Portal",
+        topic_type="concept",
+        existing_content="",
+        new_evidence=[
+            {
+                "title": "AI Portal 운영 점검",
+                "summary": "AI Portal",
+                "fact_card": "",
+                "body_excerpt": "AI Portal 인증 흐름과 장애 대응 절차를 정리합니다. 관리자 승인 없이 토큰 재발급이 되지 않습니다.",
+                "space_key": "DEMO",
+                "slug": "ai-portal-ops",
+            }
+        ],
+        related_topics=[],
+        wiki_state="",
+        prefer_llm=False,
+    )
+
+    assert "AI Portal 인증 흐름과 장애 대응 절차를 정리합니다." in updated
+    assert "- AI Portal 운영 점검: AI Portal" not in updated
 
 
 def test_sync_summary_fallback_prefers_content_line_over_heading(tmp_path, sample_settings_dict):

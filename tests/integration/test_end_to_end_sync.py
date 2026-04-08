@@ -405,7 +405,8 @@ def test_keyword_page_key_facts_use_real_content_instead_of_title_only_summary(t
     keyword_page = tmp_path / "wiki" / "global" / "knowledge" / "keywords" / "ai-portal.md"
     content = keyword_page.read_text(encoding="utf-8")
 
-    assert "- AI Portal 운영 점검: AI Portal 인증 흐름과 장애 대응 절차를 정리합니다." in content
+    assert "- AI Portal 인증 흐름과 장애 대응 절차를 정리합니다." in content
+    assert "- AI Portal 운영 점검: AI Portal 인증 흐름과 장애 대응 절차를 정리합니다." not in content
     assert "- AI Portal 운영 점검: # AI Portal 운영 현황" not in content
 
 

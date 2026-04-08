@@ -488,6 +488,7 @@ class TextLLMClient:
                     "title": item.get("title", ""),
                     "summary": item.get("summary", ""),
                     "fact_card": item.get("fact_card", ""),
+                    "body_excerpt": item.get("body_excerpt", "")[:2000],
                 }
                 for item in new_evidence[:10]
             ],
@@ -713,7 +714,7 @@ class TextLLMClient:
             "comparison": ("## 비교 개요", "## 공통점", "## 차이점", "## 관련 문서", "## 원문 근거"),
         }
         headings = heading_map.get(topic_type, heading_map["concept"])
-        evidence_lines = [f"- {item['title']}: {item['summary']}" for item in new_evidence]
+        evidence_lines = [f"- {cls._fallback_evidence_detail(item)}" for item in new_evidence]
         related_lines = [f"- {item}" for item in related_topics] or ["- 관련 주제가 아직 충분히 정리되지 않았습니다."]
         source_lines = [
             f"- [[spaces/{item['space_key']}/pages/{item['slug']}|{item['title']}]]"
@@ -738,7 +739,8 @@ class TextLLMClient:
     @staticmethod
     def _fallback_fact_card(title: str, text: str) -> str:
         compact = " ".join(text.split())
-        excerpt = compact[:240]
+        excerpt = TextLLMClient._extract_meaningful_excerpt(text) or compact[:240]
+        key_fact = TextLLMClient._extract_meaningful_excerpt(text, limit=180) or excerpt[:180]
         return "\n".join(
             [
                 f"# {title}",
@@ -749,7 +751,7 @@ class TextLLMClient:
                 "",
                 "## 핵심 사실",
                 "",
-                f"- {excerpt[:120]}" if excerpt else "- 정보 없음",
+                f"- {key_fact}" if key_fact else "- 정보 없음",
                 "",
                 "## 운영 포인트",
                 "",
@@ -789,3 +791,40 @@ class TextLLMClient:
         lines.extend(["", "## 원문 근거", ""])
         lines.extend(f"- [[spaces/{space_key}/pages/{item['slug']}|{item['title']}]]" for item in fact_cards)
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def _extract_meaningful_excerpt(text: str, limit: int = 240) -> str:
+        lines = [line.strip() for line in str(text or "").splitlines()]
+        cleaned_lines: list[str] = []
+        capture_key_facts = False
+        for line in lines:
+            if not line:
+                continue
+            if line.startswith("## "):
+                capture_key_facts = line.lower() in {"## 핵심 사실", "## key facts", "## 절차 포인트", "## 운영 포인트"}
+                continue
+            normalized = line.lstrip("-* ").strip()
+            if normalized.startswith("#"):
+                continue
+            if capture_key_facts and normalized:
+                return normalized[:limit]
+            if normalized:
+                cleaned_lines.append(normalized)
+        for line in cleaned_lines:
+            if len(line) >= 12:
+                return line[:limit]
+        compact = " ".join(str(text or "").split())
+        return compact[:limit].strip()
+
+    @classmethod
+    def _fallback_evidence_detail(cls, item: dict[str, str]) -> str:
+        detail_sources = [
+            item.get("fact_card", ""),
+            item.get("body_excerpt", ""),
+            item.get("summary", ""),
+        ]
+        for source in detail_sources:
+            detail = cls._extract_meaningful_excerpt(source, limit=200)
+            if detail:
+                return detail
+        return str(item.get("title") or "정보 없음")

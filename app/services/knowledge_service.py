@@ -513,7 +513,8 @@ class KnowledgeService:
             markdown_path = self.settings.wiki_root / wiki_document.markdown_path
             body = read_markdown_body(markdown_path) if markdown_path.exists() else ""
             summary = wiki_document.summary or self._first_line(body)
-            fact_card = self.text_client.summarize_fact_card(page.title, body, prefer_llm=False)
+            body_excerpt = self._source_body_excerpt(body)
+            fact_card = self._source_fact_card(page.title, body, summary or page.title)
             keyword_signal = self._extract_keyword_signal(page_space.space_key, page.title, summary, body)
             fact_cards.append(
                 {
@@ -526,6 +527,7 @@ class KnowledgeService:
                     "prod_url": page.prod_url or "",
                     "fact_card": fact_card,
                     "body": body,
+                    "body_excerpt": body_excerpt,
                     "keyword_signal": keyword_signal,
                 }
             )
@@ -700,7 +702,8 @@ class KnowledgeService:
             score = self._score_raw_query_match(query_tokens, page.title, wiki_document.summary or "", body)
             if score <= 0:
                 continue
-            fact_card = self.text_client.summarize_fact_card(page.title, body, prefer_llm=False)
+            body_excerpt = self._source_body_excerpt(body)
+            fact_card = self._source_fact_card(page.title, body, wiki_document.summary or self._first_line(body) or page.title)
             ranked.append(
                 (
                     score,
@@ -714,6 +717,7 @@ class KnowledgeService:
                         "prod_url": page.prod_url or "",
                         "fact_card": fact_card,
                         "body": body,
+                        "body_excerpt": body_excerpt,
                     },
                 )
             )
@@ -1126,6 +1130,26 @@ class KnowledgeService:
                 return stripped[:180]
         return ""
 
+    def _source_body_excerpt(self, body: str, limit: int = 5000) -> str:
+        excerpt = str(body or "").strip()
+        if not excerpt:
+            return ""
+        return excerpt[:limit]
+
+    def _source_fact_card(self, title: str, body: str, summary: str) -> str:
+        fact_card = self.text_client.summarize_fact_card(title, body, prefer_llm=True)
+        detail = self._best_topic_detail(title, body, summary)
+        if not self.settings.openai_api_key and detail:
+            return detail
+        if fact_card.strip():
+            return fact_card
+        if detail:
+            return detail
+        excerpt = self._source_body_excerpt(body, limit=3000)
+        if excerpt:
+            return excerpt
+        return summary.strip() or title
+
     def _normalize_query_topic(self, query: str) -> str:
         tokens = self._extract_phrase_tokens(query, GLOBAL_KNOWLEDGE_SPACE_KEY, drop_title_blacklist=False)
         if tokens:
@@ -1202,7 +1226,7 @@ class KnowledgeService:
             selected_topics = self.text_client.propose_topics_for_document(
                 page_title=str(signal["page_title"]),
                 page_summary=str(signal["page_summary"] or ""),
-                body_excerpt=str(item.get("body", ""))[:5000],
+                body_excerpt=str(item.get("body_excerpt") or item.get("body") or "")[:5000],
                 existing_topics=existing_topic_titles,
                 wiki_state=wiki_state,
                 candidate_topics=self._candidate_topics_from_signal(signal),
@@ -1320,7 +1344,12 @@ class KnowledgeService:
             page, wiki_document, space = row
             markdown_path = self.settings.wiki_root / wiki_document.markdown_path
             body = read_markdown_body(markdown_path) if markdown_path.exists() else ""
-            fact_card = self.text_client.summarize_fact_card(page.title, body, prefer_llm=False)
+            body_excerpt = self._source_body_excerpt(body)
+            fact_card = self._source_fact_card(
+                page.title,
+                body,
+                wiki_document.summary or self._first_line(body) or page.title,
+            )
             items.append(
                 {
                     "title": page.title,
@@ -1334,6 +1363,7 @@ class KnowledgeService:
                     "prod_url": page.prod_url or "",
                     "fact_card": fact_card,
                     "body": body,
+                    "body_excerpt": body_excerpt,
                 }
             )
         return items
