@@ -362,6 +362,7 @@ def test_load_raw_source_items_prefers_llm_fact_cards_and_falls_back_to_body_exc
     assert items
     assert str(items[0]["body_excerpt"]).strip()
     assert str(items[0]["fact_card"]).strip()
+    assert "왼쪽 Space 전환" in str(items[0]["fact_card"])
 
 
 def test_update_topic_page_payload_includes_body_excerpt(sample_settings_dict, monkeypatch):

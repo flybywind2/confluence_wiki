@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 
 from openai import OpenAI
@@ -204,6 +205,8 @@ class TextLLMClient:
             "Rules:\n"
             "- Preserve useful existing structure and facts when they are still supported.\n"
             "- Integrate new evidence without repeating the same point.\n"
+            "- Read the body_excerpt field of each evidence item for detailed source content.\n"
+            "- Use body_excerpt as the primary source of facts when summary and title are too thin.\n"
             "- If documents disagree, mention the disagreement explicitly.\n"
             "- If the evidence is still incomplete, say what remains unclear.\n"
             "- Treat 'Samsung DS', 'DS Division', and 'Device Solutions' as the DS division.\n"
@@ -739,8 +742,11 @@ class TextLLMClient:
     @staticmethod
     def _fallback_fact_card(title: str, text: str) -> str:
         compact = " ".join(text.split())
-        excerpt = TextLLMClient._extract_meaningful_excerpt(text) or compact[:240]
-        key_fact = TextLLMClient._extract_meaningful_excerpt(text, limit=180) or excerpt[:180]
+        excerpt = TextLLMClient._extract_meaningful_excerpt(text, limit=800, max_segments=3) or compact[:800]
+        key_fact_segments = TextLLMClient._collect_meaningful_segments(text, max_segments=4)
+        key_fact_lines = [f"- {segment}" for segment in key_fact_segments]
+        if not key_fact_lines and excerpt:
+            key_fact_lines = [f"- {line}" for line in excerpt.splitlines() if line.strip()]
         return "\n".join(
             [
                 f"# {title}",
@@ -751,7 +757,7 @@ class TextLLMClient:
                 "",
                 "## 핵심 사실",
                 "",
-                f"- {key_fact}" if key_fact else "- 정보 없음",
+                *(key_fact_lines if key_fact_lines else ["- 정보 없음"]),
                 "",
                 "## 운영 포인트",
                 "",
@@ -792,29 +798,75 @@ class TextLLMClient:
         lines.extend(f"- [[spaces/{space_key}/pages/{item['slug']}|{item['title']}]]" for item in fact_cards)
         return "\n".join(lines).strip()
 
-    @staticmethod
-    def _extract_meaningful_excerpt(text: str, limit: int = 240) -> str:
-        lines = [line.strip() for line in str(text or "").splitlines()]
-        cleaned_lines: list[str] = []
+    @classmethod
+    def _extract_meaningful_excerpt(cls, text: str, limit: int = 240, max_segments: int = 3) -> str:
+        segments = cls._collect_meaningful_segments(text, max_segments=max_segments)
+        if not segments:
+            compact = " ".join(str(text or "").split())
+            return compact[:limit].strip()
+
+        selected: list[str] = []
+        total = 0
+        for segment in segments:
+            normalized = segment.strip()
+            if not normalized:
+                continue
+            if not selected and len(normalized) >= limit:
+                selected.append(normalized[:limit].strip())
+                break
+            extra = len(normalized) + (1 if selected else 0)
+            if selected and total + extra > limit:
+                break
+            selected.append(normalized)
+            total += extra
+        return "\n".join(selected).strip()
+
+    @classmethod
+    def _collect_meaningful_segments(cls, text: str, max_segments: int = 4) -> list[str]:
+        preferred: list[str] = []
+        general: list[str] = []
         capture_key_facts = False
-        for line in lines:
+
+        for raw_line in str(text or "").splitlines():
+            line = raw_line.strip()
             if not line:
                 continue
             if line.startswith("## "):
                 capture_key_facts = line.lower() in {"## 핵심 사실", "## key facts", "## 절차 포인트", "## 운영 포인트"}
                 continue
-            normalized = line.lstrip("-* ").strip()
-            if normalized.startswith("#"):
+            normalized = cls._normalize_excerpt_line(line)
+            if not normalized:
                 continue
-            if capture_key_facts and normalized:
-                return normalized[:limit]
-            if normalized:
-                cleaned_lines.append(normalized)
-        for line in cleaned_lines:
-            if len(line) >= 12:
-                return line[:limit]
-        compact = " ".join(str(text or "").split())
-        return compact[:limit].strip()
+            parts = cls._split_excerpt_segments(normalized)
+            target = preferred if capture_key_facts else general
+            for part in parts:
+                cleaned = cls._normalize_excerpt_line(part)
+                if not cleaned:
+                    continue
+                if cleaned not in target:
+                    target.append(cleaned)
+
+        segments = preferred or general
+        return segments[:max_segments]
+
+    @staticmethod
+    def _split_excerpt_segments(text: str) -> list[str]:
+        parts = re.split(r"(?<=[.!?])\s+|[;\n]+", str(text or "").strip())
+        return [part.strip() for part in parts if part.strip()]
+
+    @staticmethod
+    def _normalize_excerpt_line(text: str) -> str:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return ""
+        normalized = re.sub(r"^[>\-\*\d\.\)\s]+", "", normalized)
+        normalized = re.sub(r"^\s*#{1,6}\s*", "", normalized)
+        normalized = re.sub(r"\[(?P<label>[^\]]+)\]\((?P<href>[^)]+)\)", r"\g<label>", normalized)
+        normalized = re.sub(r"!\[\[(?P<embed>[^\]]+)\]\]|\[\[(?P<target>[^\]|]+)(?:\|(?P<label>[^\]]+))?\]\]", lambda match: match.group("label") or match.group("target") or match.group("embed") or "", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip(" -:|")
+        if not normalized or normalized.startswith("#"):
+            return ""
+        return normalized
 
     @classmethod
     def _fallback_evidence_detail(cls, item: dict[str, str]) -> str:
@@ -824,7 +876,7 @@ class TextLLMClient:
             item.get("summary", ""),
         ]
         for source in detail_sources:
-            detail = cls._extract_meaningful_excerpt(source, limit=200)
+            detail = cls._extract_meaningful_excerpt(source, limit=500, max_segments=3).replace("\n", " ")
             if detail:
                 return detail
         return str(item.get("title") or "정보 없음")

@@ -1139,15 +1139,18 @@ class KnowledgeService:
     def _source_fact_card(self, title: str, body: str, summary: str) -> str:
         fact_card = self.text_client.summarize_fact_card(title, body, prefer_llm=True)
         detail = self._best_topic_detail(title, body, summary)
-        if not self.settings.openai_api_key and detail:
-            return detail
         if fact_card.strip():
+            if detail and detail not in fact_card:
+                return f"{fact_card}\n\n- {detail}"
             return fact_card
-        if detail:
-            return detail
         excerpt = self._source_body_excerpt(body, limit=3000)
         if excerpt:
-            return excerpt
+            fact_card = self.text_client._fallback_fact_card(title, excerpt)
+            if detail and detail not in fact_card:
+                return f"{fact_card}\n\n- {detail}"
+            return fact_card
+        if detail:
+            return self.text_client._fallback_fact_card(title, detail)
         return summary.strip() or title
 
     def _normalize_query_topic(self, query: str) -> str:
