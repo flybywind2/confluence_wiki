@@ -324,6 +324,23 @@ LOW_SIGNAL_SUFFIXES = (
     "되었는지",
     "되었는가",
 )
+GENERIC_FACT_PREFIXES = (
+    "이 문서는",
+    "이번 문서는",
+    "본 문서는",
+    "이 페이지는",
+    "운영 상태를 정리한 문서입니다",
+    "주제 개요",
+    "테스트 개요",
+)
+GENERIC_FACT_SUBSTRINGS = (
+    "정리한 문서입니다",
+    "운영 시 원문 확인 필요",
+    "정보 없음",
+    "보조 문서입니다",
+    "데모용 문서이므로",
+    "이미지 설명",
+)
 TOPIC_HEADWORDS = {
     "agent",
     "analysis",
@@ -523,7 +540,7 @@ class KnowledgeService:
                     title=keyword["title"],
                     summary=keyword["summary"],
                     body=keyword["body"],
-                    source_refs="\n".join(keyword["source_refs"]),
+                    source_refs=keyword["source_refs"],
                 )
             )
         return docs
@@ -784,7 +801,7 @@ class KnowledgeService:
         body: str,
     ) -> dict[str, str]:
         normalized_kind = normalize_knowledge_kind(kind)
-        if normalized_kind not in {"keyword", "analysis", "lint"}:
+        if normalized_kind not in {"keyword", "analysis", "query", "lint"}:
             raise ValueError("editing is only allowed for user-visible knowledge documents")
         content = body.strip()
         if not content:
@@ -832,6 +849,128 @@ class KnowledgeService:
             "slug": doc.slug,
             "title": doc.title,
             "href": knowledge_href(doc.kind, doc.slug),
+        }
+
+    def regenerate_document(
+        self,
+        *,
+        kind: str,
+        slug: str,
+        selected_space: str | None = None,
+    ) -> dict[str, str]:
+        session = self.session_factory()
+        try:
+            result = self.regenerate_document_with_session(
+                session,
+                kind=kind,
+                slug=slug,
+                selected_space=selected_space,
+            )
+            session.commit()
+            return result
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def regenerate_document_with_session(
+        self,
+        session,
+        *,
+        kind: str,
+        slug: str,
+        selected_space: str | None = None,
+    ) -> dict[str, str]:
+        normalized_kind = normalize_knowledge_kind(kind)
+        if normalized_kind not in {"keyword", "query", "lint"}:
+            raise ValueError("regeneration is only allowed for generated knowledge documents")
+
+        global_space = ensure_global_knowledge_space(session)
+        doc = session.scalar(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.space_id == global_space.id,
+                KnowledgeDocument.kind == normalized_kind,
+                KnowledgeDocument.slug == slug,
+            )
+        )
+        if doc is None:
+            doc = session.scalar(
+                select(KnowledgeDocument).where(
+                    KnowledgeDocument.kind == normalized_kind,
+                    KnowledgeDocument.slug == slug,
+                )
+            )
+        if doc is None:
+            raise ValueError("knowledge document not found")
+
+        scoped_space = self._resolve_regenerate_space(selected_space, doc.source_refs)
+        regenerated_doc: KnowledgeDocument | None = None
+
+        if normalized_kind == "query":
+            return self.save_query_wiki_with_session(
+                session,
+                query=doc.title,
+                selected_space=scoped_space,
+            )
+
+        if normalized_kind == "lint":
+            from app.services.lint_service import LintService
+
+            regenerated_doc = LintService(self.settings).rebuild_global_with_session(
+                session,
+                selected_space=scoped_space,
+            )
+            if regenerated_doc is None:
+                raise ValueError("lint document could not be regenerated")
+        elif normalized_kind == "keyword":
+            items = self._load_raw_source_items(session, doc.source_refs)
+            if not items:
+                raise ValueError("knowledge document has no raw sources")
+            existing_body = self._document_body(doc)
+            wiki_state = self._build_wiki_state_snapshot(session)
+            rebuilt = self._build_keyword_document(
+                topic=doc.title,
+                items=items,
+                existing_body=existing_body,
+                wiki_state=wiki_state,
+                related_topics=self._related_topics_from_items(session, items, exclude_title=doc.title),
+                source_refs_override="\n".join(page_link(item["space_key"], item["slug"], item["title"]) for item in items),
+            )
+            regenerated_doc = self._upsert_document(
+                session=session,
+                space=global_space,
+                kind="keyword",
+                slug=doc.slug,
+                title=rebuilt["title"],
+                summary=rebuilt["summary"],
+                body=rebuilt["body"],
+                source_refs=rebuilt["source_refs"],
+            )
+
+        if regenerated_doc is None:
+            raise ValueError("knowledge document could not be regenerated")
+
+        self._rebuild_indexes_for_space(session, global_space)
+        append_space_log(
+            self.settings.wiki_root,
+            scoped_space or "GLOBAL",
+            "knowledge-regenerate",
+            datetime.now(),
+            [
+                {
+                    "title": regenerated_doc.title,
+                    "slug": regenerated_doc.slug,
+                    "kind": regenerated_doc.kind,
+                    "href": knowledge_href(regenerated_doc.kind, regenerated_doc.slug),
+                }
+            ],
+        )
+        return {
+            "kind": regenerated_doc.kind,
+            "slug": regenerated_doc.slug,
+            "title": regenerated_doc.title,
+            "href": knowledge_href(regenerated_doc.kind, regenerated_doc.slug),
         }
 
     def list_documents(self, session, space_id: int | None = None) -> list[KnowledgeDocument]:
@@ -963,10 +1102,20 @@ class KnowledgeService:
             return []
         pattern = re.compile(r"(?:/spaces/|spaces/)(?P<space_key>[^/\]]+)/pages/(?P<slug>[^|\]\s)]+)")
         refs: list[tuple[str, str]] = []
-        for match in pattern.finditer(str(source_refs or "")):
-            ref = ((match.group("space_key") or "").strip(), (match.group("slug") or "").strip())
-            if ref[0] and ref[1] and ref not in refs:
-                refs.append(ref)
+
+        def collect(text: str) -> None:
+            for match in pattern.finditer(text):
+                ref = ((match.group("space_key") or "").strip(), (match.group("slug") or "").strip())
+                if ref[0] and ref[1] and ref not in refs:
+                    refs.append(ref)
+
+        source_text = str(source_refs or "")
+        collect(source_text)
+        if refs:
+            return refs
+        collapsed = "".join(line.strip() for line in source_text.splitlines())
+        if collapsed and collapsed != source_text:
+            collect(collapsed)
         return refs
 
     @staticmethod
@@ -1083,35 +1232,53 @@ class KnowledgeService:
             keyword_pages.items(),
             key=lambda pair: (-doc_counts[pair[0]], -total_scores[pair[0]], pair[0]),
         ):
-            related_topics = [candidate for candidate, _count in co_occurrence.get(topic, Counter()).most_common(6)]
-            source_spaces = [item["space_key"] for item in items]
             existing_topic = existing_topics.get(self._normalize_topic_key(topic), {})
-            topic_type = self.text_client.classify_topic_type(
-                topic=topic,
-                supporting_documents=items,
-                existing_content=str(existing_topic.get("body") or ""),
-                wiki_state=wiki_state,
-            )
-            synthesized = self.text_client.update_topic_page(
-                space_key=", ".join(sorted(set(source_spaces))),
-                topic=topic,
-                topic_type=topic_type,
-                existing_content=str(existing_topic.get("body") or ""),
-                new_evidence=items,
-                related_topics=related_topics,
-                wiki_state=wiki_state,
-                prefer_llm=True,
-            )
             documents.append(
-                {
-                    "slug": self._keyword_slug(topic),
-                    "title": topic,
-                    "summary": self._keyword_summary(topic, items),
-                    "body": self._ensure_keyword_sections(topic, items, related_topics, synthesized),
-                    "source_refs": [page_link(item["space_key"], item["slug"], item["title"]) for item in items],
-                }
+                self._build_keyword_document(
+                    topic=topic,
+                    items=items,
+                    existing_body=str(existing_topic.get("body") or ""),
+                    wiki_state=wiki_state,
+                    related_topics=[candidate for candidate, _count in co_occurrence.get(topic, Counter()).most_common(6)],
+                    source_refs_override="\n".join(page_link(item["space_key"], item["slug"], item["title"]) for item in items),
+                )
             )
         return documents
+
+    def _build_keyword_document(
+        self,
+        *,
+        topic: str,
+        items: list[dict[str, str]],
+        existing_body: str,
+        wiki_state: str,
+        related_topics: list[str],
+        source_refs_override: str | None = None,
+    ) -> dict[str, str]:
+        topic_type = self.text_client.classify_topic_type(
+            topic=topic,
+            supporting_documents=items,
+            existing_content=existing_body,
+            wiki_state=wiki_state,
+        )
+        synthesized = self.text_client.update_topic_page(
+            space_key=", ".join(sorted({item["space_key"] for item in items})),
+            topic=topic,
+            topic_type=topic_type,
+            existing_content=existing_body,
+            new_evidence=items,
+            related_topics=related_topics,
+            wiki_state=wiki_state,
+            prefer_llm=True,
+        )
+        return {
+            "slug": self._keyword_slug(topic),
+            "title": topic,
+            "summary": self._keyword_summary(topic, items),
+            "body": self._ensure_keyword_sections(topic, items, related_topics, synthesized),
+            "source_refs": source_refs_override
+            or "\n".join(page_link(item["space_key"], item["slug"], item["title"]) for item in items),
+        }
 
     def _expanded_source_refs(self, session, sources: list[dict[str, str]]) -> list[str]:
         refs: list[str] = []
@@ -1135,6 +1302,51 @@ class KnowledgeService:
                 if normalized and normalized not in refs:
                     refs.append(normalized)
         return refs
+
+    def _load_raw_source_items(self, session, source_refs: str | None) -> list[dict[str, str]]:
+        refs = self._knowledge_source_page_keys(source_refs)
+        if not refs:
+            return []
+        items: list[dict[str, str]] = []
+        for space_key, slug in refs:
+            row = session.execute(
+                select(Page, WikiDocument, Space)
+                .join(WikiDocument, WikiDocument.page_id == Page.id)
+                .join(Space, Space.id == Page.space_id)
+                .where(Space.space_key == space_key, Page.slug == slug)
+            ).first()
+            if row is None:
+                continue
+            page, wiki_document, space = row
+            markdown_path = self.settings.wiki_root / wiki_document.markdown_path
+            body = read_markdown_body(markdown_path) if markdown_path.exists() else ""
+            fact_card = self.text_client.summarize_fact_card(page.title, body, prefer_llm=False)
+            items.append(
+                {
+                    "title": page.title,
+                    "slug": page.slug,
+                    "space_key": space.space_key,
+                    "space_name": space.name or space.space_key,
+                    "summary": self._best_topic_detail(page.title, body, wiki_document.summary or self._first_line(body))
+                    or wiki_document.summary
+                    or self._first_line(body),
+                    "href": f"/spaces/{space.space_key}/pages/{page.slug}",
+                    "prod_url": page.prod_url or "",
+                    "fact_card": fact_card,
+                    "body": body,
+                }
+            )
+        return items
+
+    @staticmethod
+    def _resolve_regenerate_space(selected_space: str | None, source_refs: str | None) -> str | None:
+        normalized = str(selected_space or "").strip()
+        if normalized and normalized not in {"all"}:
+            return normalized
+        spaces = source_space_keys(source_refs)
+        if len(spaces) == 1:
+            return spaces[0]
+        return None
 
     @staticmethod
     def _source_href(item: dict[str, str]) -> str:
@@ -1172,7 +1384,7 @@ class KnowledgeService:
         body: str,
     ) -> str:
         source_spaces = sorted({item["space_key"] for item in items})
-        key_fact_lines = self._render_keyword_fact_lines(items)
+        key_fact_lines = self._render_keyword_fact_lines(title, items, existing_body=body)
         section_requirements = {
             "## 개요": self._default_keyword_overview(title, items),
             "## 핵심 사실": key_fact_lines,
@@ -1195,21 +1407,32 @@ class KnowledgeService:
         normalized = self._upsert_markdown_section(normalized, "## 원문 근거", section_requirements["## 원문 근거"], replace_existing=True)
         return normalized.strip()
 
-    def _render_keyword_fact_lines(self, items: list[dict[str, str]]) -> str:
-        lines: list[str] = []
-        seen: set[str] = set()
+    def _render_keyword_fact_lines(self, topic: str, items: list[dict[str, str]], existing_body: str = "") -> str:
+        ranked_candidates: list[tuple[int, str]] = []
+        source_title_keys = {self._normalize_topic_key(str(item.get("title") or "")) for item in items}
+        ranked_candidates.extend((120 - index, line) for index, line in enumerate(self._extract_generated_fact_lines(existing_body, topic)))
         for item in items:
-            title = str(item.get("title") or "").strip()
-            detail = self._best_fact_detail(item)
-            line = f"- {title}: {detail}" if title and detail else (f"- {title}" if title else "")
-            if not line or line in seen:
-                continue
-            seen.add(line)
-            lines.append(line)
-        return "\n".join(lines) or "- 정보 없음"
+            ranked_candidates.extend((90 - index, line) for index, line in enumerate(self._collect_fact_candidates(topic, str(item.get("fact_card") or ""), max_count=3, source_bias=24)))
+            ranked_candidates.extend((80 - index, line) for index, line in enumerate(self._collect_fact_candidates(topic, str(item.get("body") or ""), max_count=4, source_bias=18)))
+            ranked_candidates.extend((50 - index, line) for index, line in enumerate(self._collect_fact_candidates(topic, str(item.get("summary") or ""), max_count=1, source_bias=8)))
 
-    def _best_fact_detail(self, item: dict[str, str]) -> str:
-        title = str(item.get("title") or "")
+        selected: list[str] = []
+        seen: set[str] = set()
+        for _score, line in sorted(ranked_candidates, key=lambda item: (-item[0], -len(item[1]), item[1])):
+            stripped_line = self._strip_source_title_prefix(line, items)
+            normalized_line = self._normalize_candidate_key(stripped_line)
+            if normalized_line in source_title_keys:
+                continue
+            if not normalized_line or normalized_line in seen:
+                continue
+            seen.add(normalized_line)
+            selected.append(stripped_line)
+            if len(selected) >= 6:
+                break
+        return "\n".join(f"- {line}" for line in selected) or "- 정보 없음"
+
+    def _best_fact_detail(self, item: dict[str, str], focus_title: str | None = None) -> str:
+        title = str(focus_title or item.get("title") or "")
         for candidate in (
             self._extract_fact_card_detail(str(item.get("fact_card") or ""), title),
             self._extract_body_detail(str(item.get("body") or ""), title),
@@ -1218,6 +1441,145 @@ class KnowledgeService:
             if candidate:
                 return candidate
         return ""
+
+    def _best_topic_detail(self, topic: str, body: str, summary: str) -> str:
+        candidates = self._collect_fact_candidates(topic, body, max_count=1, source_bias=18)
+        if candidates:
+            return candidates[0]
+        candidates = self._collect_fact_candidates(topic, summary, max_count=1, source_bias=8)
+        if candidates:
+            return candidates[0]
+        detail = self._extract_topic_matched_fragment(body, topic)
+        if detail:
+            return detail
+        return self._extract_topic_matched_fragment(summary, topic)
+
+    def _extract_generated_fact_lines(self, markdown: str, topic: str) -> list[str]:
+        sections = (
+            "## 핵심 사실",
+            "## Key Facts",
+            "## 절차 포인트",
+            "## 운영 주의점",
+            "## 정체",
+            "## 결정 사항",
+            "## 공통점",
+            "## 차이점",
+        )
+        lines: list[str] = []
+        for heading in sections:
+            section = self._extract_markdown_section(markdown, (heading,))
+            for line in self._collect_fact_candidates(topic, section, max_count=4, source_bias=32):
+                if line not in lines:
+                    lines.append(line)
+        return lines
+
+    def _collect_fact_candidates(
+        self,
+        topic: str,
+        text: str,
+        *,
+        max_count: int = 4,
+        source_bias: int = 0,
+    ) -> list[str]:
+        topic_keys = [token.key for token in self._extract_phrase_tokens(topic, GLOBAL_KNOWLEDGE_SPACE_KEY, drop_title_blacklist=False)]
+        topic_keys = [key for key in topic_keys if key and key not in STOPWORDS]
+        if not topic_keys:
+            normalized_topic_key = self._normalize_topic_key(topic)
+            topic_keys = [normalized_topic_key] if normalized_topic_key else []
+
+        current_heading = ""
+        ranked: list[tuple[int, str]] = []
+        for raw_line in str(text or "").splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("## "):
+                current_heading = self._normalize_fact_text(stripped, topic)
+                continue
+            if stripped.startswith("#"):
+                continue
+            if MARKDOWN_TABLE_SEPARATOR_RE.match(stripped) or stripped.startswith(("|", "![[", "![", "```")):
+                continue
+            fragments = [stripped]
+            if not stripped.startswith(("-", "*", ">")):
+                fragments.extend(fragment for fragment in BODY_FRAGMENT_SPLIT_RE.split(stripped) if fragment.strip())
+            for fragment in fragments:
+                cleaned = self._normalize_fact_text(fragment, topic)
+                if not cleaned:
+                    continue
+                score = self._score_fact_candidate(
+                    cleaned,
+                    topic_keys=topic_keys,
+                    heading=current_heading,
+                    source_bias=source_bias,
+                    bullet_like=stripped.startswith(("-", "*", "1.", "2.", "3.", ">")),
+                )
+                if score <= 0:
+                    continue
+                ranked.append((score, cleaned))
+        selected: list[str] = []
+        seen: set[str] = set()
+        for _score, line in sorted(ranked, key=lambda item: (-item[0], -len(item[1]), item[1])):
+            normalized_line = self._normalize_candidate_key(line)
+            if not normalized_line or normalized_line in seen:
+                continue
+            seen.add(normalized_line)
+            selected.append(line)
+            if len(selected) >= max_count:
+                break
+        return selected
+
+    def _score_fact_candidate(
+        self,
+        text: str,
+        *,
+        topic_keys: list[str],
+        heading: str,
+        source_bias: int,
+        bullet_like: bool,
+    ) -> int:
+        normalized_text = self._normalize_candidate_key(text)
+        if not normalized_text:
+            return 0
+        score = source_bias
+        if bullet_like:
+            score += 6
+        if 18 <= len(text) <= 180:
+            score += 4
+        if re.search(r"\d", text):
+            score += 4
+        if re.search(r"[A-Z]{2,}", text):
+            score += 3
+        if any(prefix in text for prefix in GENERIC_FACT_PREFIXES) or any(token in text for token in GENERIC_FACT_SUBSTRINGS):
+            score -= 20
+        heading_key = self._normalize_candidate_key(heading)
+        topic_match = any(topic_key and topic_key in normalized_text for topic_key in topic_keys)
+        heading_match = bool(heading_key and any(topic_key and topic_key in heading_key for topic_key in topic_keys))
+        if topic_match:
+            score += 14
+        elif heading_match:
+            score += 8
+        else:
+            score -= 20
+        if len(normalized_text) < 12:
+            score -= 10
+        return score if score >= 8 else 0
+
+    @staticmethod
+    def _normalize_candidate_key(text: str) -> str:
+        normalized = re.sub(r"\s+", " ", str(text or "").strip()).strip(" .,:;")
+        return normalized.lower()
+
+    def _strip_source_title_prefix(self, text: str, items: list[dict[str, str]]) -> str:
+        normalized = str(text or "").strip()
+        if ":" not in normalized:
+            return normalized
+        prefix, remainder = normalized.split(":", 1)
+        prefix_key = self._normalize_topic_key(prefix)
+        source_title_keys = {self._normalize_topic_key(str(item.get("title") or "")) for item in items}
+        if prefix_key and prefix_key in source_title_keys:
+            return remainder.strip()
+        return normalized
 
     def _extract_fact_card_detail(self, fact_card: str, title: str) -> str:
         for headings in (("## 핵심 사실", "## Key Facts"), ("## 개요", "## Overview")):
@@ -1229,6 +1591,37 @@ class KnowledgeService:
 
     def _extract_body_detail(self, body: str, title: str) -> str:
         return self._extract_fact_fragment(body, title, skip_headings=True)
+
+    def _extract_topic_matched_fragment(self, text: str, topic: str) -> str:
+        topic_keys = [token.key for token in self._extract_phrase_tokens(topic, GLOBAL_KNOWLEDGE_SPACE_KEY, drop_title_blacklist=False)]
+        topic_keys = [key for key in topic_keys if key and key not in STOPWORDS]
+        if not topic_keys:
+            normalized_topic_key = self._normalize_topic_key(topic)
+            topic_keys = [normalized_topic_key] if normalized_topic_key else []
+        if not topic_keys:
+            return ""
+        fallback = ""
+        for raw_line in text.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#") or MARKDOWN_TABLE_SEPARATOR_RE.match(stripped) or stripped.startswith(("|", "![[", "![", "```")):
+                continue
+            cleaned_line = self._normalize_fact_text(stripped, topic)
+            if cleaned_line:
+                if not fallback:
+                    fallback = cleaned_line
+                cleaned_line_key = self._normalize_topic_key(cleaned_line)
+                if any(topic_key and topic_key in cleaned_line_key for topic_key in topic_keys):
+                    return cleaned_line
+            for fragment in BODY_FRAGMENT_SPLIT_RE.split(stripped):
+                cleaned = self._normalize_fact_text(fragment, topic)
+                if not cleaned:
+                    continue
+                if not fallback:
+                    fallback = cleaned
+                cleaned_key = self._normalize_topic_key(cleaned)
+                if any(topic_key and topic_key in cleaned_key for topic_key in topic_keys):
+                    return cleaned
+        return fallback
 
     def _extract_fact_fragment(self, text: str, title: str, *, skip_headings: bool = False) -> str:
         if not text.strip():
@@ -1281,7 +1674,9 @@ class KnowledgeService:
         normalized = MARKDOWN_LINK_RE.sub(lambda match: match.group("label"), normalized)
         normalized = WIKI_LINK_RE.sub(cls._replace_wiki_link_with_label, normalized)
         normalized = re.sub(r"`([^`]*)`", r"\1", normalized)
+        normalized = re.sub(r"^[>\-\*\d\.\)\s]+", "", normalized)
         normalized = re.sub(r"^\s*#{1,6}\s*", "", normalized)
+        normalized = BeautifulSoup(normalized, "html.parser").get_text(" ", strip=True)
         normalized = re.sub(r"\s+", " ", normalized).strip(" -:|")
         if not normalized or normalized == "정보 없음":
             return ""

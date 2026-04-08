@@ -148,7 +148,7 @@ def test_rebuild_global_passes_existing_topics_and_existing_body_to_llm_editor(
     assert any("## 관련 문서" in str(call["existing_content"]) for call in update_calls if str(call["existing_content"]).strip())
 
 
-def test_ensure_keyword_sections_replaces_title_only_key_facts_with_real_content(tmp_path, sample_settings_dict):
+def test_ensure_keyword_sections_replaces_title_only_key_facts_with_multiple_real_content_lines(tmp_path, sample_settings_dict):
     sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
     sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
     sample_settings_dict["DATABASE_URL"] = f"sqlite:///{tmp_path / 'app.db'}"
@@ -175,6 +175,7 @@ def test_ensure_keyword_sections_replaces_title_only_key_facts_with_real_content
                     "## 핵심 사실",
                     "",
                     "- AI Portal 인증 흐름과 장애 대응 절차를 정리합니다.",
+                    "- 관리자 승인 없이 토큰 재발급이 되지 않도록 막았습니다.",
                     "",
                     "## 운영 포인트",
                     "",
@@ -185,7 +186,19 @@ def test_ensure_keyword_sections_replaces_title_only_key_facts_with_real_content
                     "- AI Portal 운영 점검",
                 ]
             ),
-            "body": "# AI Portal 운영 현황\n\nAI Portal 인증 흐름과 장애 대응 절차를 정리합니다.",
+            "body": "\n".join(
+                [
+                    "# AI Portal 운영 현황",
+                    "",
+                    "이번 문서는 운영 상태를 정리한 문서입니다.",
+                    "",
+                    "## AI Portal 인증 이슈",
+                    "",
+                    "AI Portal 인증 흐름과 장애 대응 절차를 정리합니다.",
+                    "- 관리자 승인 없이 토큰 재발급이 되지 않도록 막았습니다.",
+                    "- 장애 발생 시 포털 접근 로그를 먼저 확인합니다.",
+                ]
+            ),
         }
     ]
     generated = "\n".join(
@@ -198,14 +211,57 @@ def test_ensure_keyword_sections_replaces_title_only_key_facts_with_real_content
             "",
             "## 핵심 사실",
             "",
-            "- AI Portal 운영 점검: # AI Portal 운영 현황",
+            "- AI Portal",
         ]
     )
 
     updated = service._ensure_keyword_sections("AI Portal", items, [], generated)
 
-    assert "- AI Portal 운영 점검: AI Portal 인증 흐름과 장애 대응 절차를 정리합니다." in updated
-    assert "- AI Portal 운영 점검: # AI Portal 운영 현황" not in updated
+    assert "- AI Portal 인증 흐름과 장애 대응 절차를 정리합니다." in updated
+    assert "- 관리자 승인 없이 토큰 재발급이 되지 않도록 막았습니다." in updated
+    assert "이번 문서는 운영 상태를 정리한 문서입니다." not in updated
+    assert "- AI Portal 운영 점검:" not in updated
+
+
+def test_ensure_keyword_sections_preserves_rich_generated_key_facts_when_present(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    sample_settings_dict["DATABASE_URL"] = f"sqlite:///{tmp_path / 'app.db'}"
+    settings = Settings.model_validate(sample_settings_dict)
+    service = KnowledgeService(settings)
+
+    items = [
+        {
+            "title": "DS Assistant 회의록",
+            "slug": "ds-assistant-note",
+            "space_key": "DEMO",
+            "space_name": "Demo Showcase",
+            "summary": "DS Assistant 운영 이슈를 정리한 회의록입니다.",
+            "href": "/spaces/DEMO/pages/ds-assistant-note",
+            "prod_url": "https://prod.example.com/confluence/pages/viewpage.action?pageId=200",
+            "fact_card": "# DS Assistant 회의록\n\n## 개요\n\nDS Assistant 운영 이슈를 정리한 회의록입니다.",
+            "body": "# DS Assistant 회의록\n\n이번 문서는 운영 상태를 정리한 문서입니다.",
+        }
+    ]
+    generated = "\n".join(
+        [
+            "# DS Assistant",
+            "",
+            "## 개요",
+            "",
+            "DS Assistant 주제 개요",
+            "",
+            "## 핵심 사실",
+            "",
+            "- DS Assistant는 권한 캐시 만료 시 재시도 로직이 없습니다.",
+            "- 포털 검색 API timeout이 2초라서 응답 지연이 커집니다.",
+        ]
+    )
+
+    updated = service._ensure_keyword_sections("DS Assistant", items, [], generated)
+
+    assert "- DS Assistant는 권한 캐시 만료 시 재시도 로직이 없습니다." in updated
+    assert "- 포털 검색 API timeout이 2초라서 응답 지연이 커집니다." in updated
 
 
 def test_sync_summary_fallback_prefers_content_line_over_heading(tmp_path, sample_settings_dict):

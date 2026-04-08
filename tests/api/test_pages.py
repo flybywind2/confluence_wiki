@@ -2,10 +2,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.core.config import Settings
+from app.core.markdown import read_markdown_document
 from app.db.models import Page, PageVersion
 from app.db.session import create_session_factory
 from app.demo_seed import seed_demo_content
 from app.main import app, create_app
+from app.services.wiki_writer import write_markdown_file
 
 
 def test_index_page_renders_space_selector():
@@ -213,6 +215,20 @@ def test_knowledge_page_shows_edit_link_and_raw_page_does_not(tmp_path, sample_s
     assert '/spaces/DEMO/pages/demo-home-9001/edit' not in raw_response.text
 
 
+def test_generated_knowledge_page_shows_regenerate_action(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    response = client.get("/knowledge/keywords/운영-대시보드")
+
+    assert response.status_code == 200
+    assert 'action="/knowledge/keywords/%EC%9A%B4%EC%98%81-%EB%8C%80%EC%8B%9C%EB%B3%B4%EB%93%9C/regenerate"' in response.text
+    assert "다시 생성" in response.text
+
+
 def test_global_keyword_page_shows_clickable_original_confluence_link(tmp_path, sample_settings_dict):
     sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
     sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
@@ -280,6 +296,32 @@ def test_knowledge_edit_save_updates_rendered_content(tmp_path, sample_settings_
 
     keyword_file = tmp_path / "wiki" / "global" / "knowledge" / "keywords" / "운영-대시보드.md"
     assert "수정된 본문입니다." in keyword_file.read_text(encoding="utf-8")
+
+
+def test_keyword_regenerate_route_rebuilds_single_document_from_current_raw_sources(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    raw_page_path = tmp_path / "wiki" / "spaces" / "DEMO" / "pages" / "ops-dashboard-9002.md"
+    frontmatter, body_markdown = read_markdown_document(raw_page_path)
+    updated_body = body_markdown + "\n\n대시보드 경보 임계치와 알림 지연 원인을 다시 정리합니다.\n"
+    write_markdown_file(raw_page_path, frontmatter, updated_body)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    response = client.post(
+        "/knowledge/keywords/운영-대시보드/regenerate",
+        data={"selected_space": "DEMO"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].endswith("/knowledge/keywords/%EC%9A%B4%EC%98%81-%EB%8C%80%EC%8B%9C%EB%B3%B4%EB%93%9C")
+
+    rendered = client.get("/knowledge/keywords/운영-대시보드")
+    assert rendered.status_code == 200
+    assert "대시보드 경보 임계치와 알림 지연 원인을 다시 정리합니다." in rendered.text
 
 
 def test_query_page_renders_under_canonical_query_route(tmp_path, sample_settings_dict):
