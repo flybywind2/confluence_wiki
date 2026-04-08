@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}로그인{% endblock %}
+{% block content %}
+<article class="page-card login-card">
+  <header class="page-header">
+    <span class="eyebrow">Authentication</span>
+    <h1>로그인</h1>
+    <div class="page-submeta">
+      <span>조회/편집/관리 권한은 계정 역할에 따라 구분됩니다.</span>
+    </div>
+  </header>
+  {% if login_error %}
+  <div class="history-banner">
+    <span>{{ login_error }}</span>
+  </div>
+  {% endif %}
+  <form class="editor-form login-form" action="/auth/login" method="post">
+    <input type="hidden" name="next" value="{{ login_next or '/' }}" />
+    <label>
+      <span>아이디</span>
+      <input class="login-input" type="text" name="username" autocomplete="username" required />
+    </label>
+    <label>
+      <span>비밀번호</span>
+      <input class="login-input" type="password" name="password" autocomplete="current-password" required />
+    </label>
+    <div class="editor-actions">
+      <button type="submit" class="hero-link">로그인</button>
+    </div>
+  </form>
+</article>
+{% endblock %}

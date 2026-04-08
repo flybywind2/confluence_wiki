@@ -8,15 +8,33 @@
     <p class="graph-scope">{{ selected_space_name }}</p>
     <p>{% if selected_view == 'knowledge' %}키워드 문서, 검색 위키, 분석 문서와 원문 근거의 연결을 시각화합니다.{% else %}부모-자식 관계와 문서 내 링크를 동시에 시각화합니다.{% endif %}</p>
   </div>
-  <div class="legend">
-    {% if selected_view == 'knowledge' %}
-    <span><i class="legend-line keyword-source"></i>Keyword Source</span>
-    <span><i class="legend-line keyword-related"></i>Keyword Related</span>
-    <span><i class="legend-line analysis-keyword"></i>Analysis Link</span>
-    {% else %}
-    <span><i class="legend-line hierarchy"></i>Hierarchy</span>
-    <span><i class="legend-line wiki"></i>Wiki Link</span>
-    {% endif %}
+  <div class="graph-legend-panels">
+    <div class="graph-legend-panel">
+      <div class="graph-legend-title">노드 범례</div>
+      <div class="legend legend-nodes">
+        {% if selected_view == 'knowledge' %}
+        <span><i class="legend-node keyword"></i>키워드 문서</span>
+        <span><i class="legend-node query"></i>검색 위키</span>
+        <span><i class="legend-node analysis"></i>분석 문서</span>
+        <span><i class="legend-node page"></i>원문 페이지</span>
+        {% else %}
+        <span><i class="legend-node page"></i>원문 페이지</span>
+        {% endif %}
+      </div>
+    </div>
+    <div class="graph-legend-panel">
+      <div class="graph-legend-title">링크 범례</div>
+      <div class="legend legend-links">
+        {% if selected_view == 'knowledge' %}
+        <span><i class="legend-line keyword-source"></i>Keyword Source</span>
+        <span><i class="legend-line keyword-related"></i>Keyword Related</span>
+        <span><i class="legend-line analysis-keyword"></i>Analysis Link</span>
+        {% else %}
+        <span><i class="legend-line hierarchy"></i>Hierarchy</span>
+        <span><i class="legend-line wiki"></i>Wiki Link</span>
+        {% endif %}
+      </div>
+    </div>
   </div>
 </section>
 <section class="list-card facet-card">

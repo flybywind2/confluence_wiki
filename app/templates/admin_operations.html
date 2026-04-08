@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block title %}운영 관리{% endblock %}
+{% block content %}
+<article class="page-card admin-card admin-operations-card">
+  <header class="page-header">
+    <span class="eyebrow">Admin</span>
+    <h1>운영 관리</h1>
+    <div class="page-submeta">
+      <span>Confluence Bootstrap 대상과 증분 동기화 스케줄을 UI에서 관리합니다.</span>
+    </div>
+  </header>
+
+  {% if notice %}
+  <div class="history-banner admin-notice-banner">
+    <strong>완료</strong>
+    <span>{{ notice }}</span>
+  </div>
+  {% endif %}
+  {% if error %}
+  <div class="history-banner admin-error-banner">
+    <strong>오류</strong>
+    <span>{{ error }}</span>
+  </div>
+  {% endif %}
+
+  <section class="history-panel">
+    <div class="section-header">
+      <h2>요약</h2>
+    </div>
+    <div class="admin-summary-grid">
+      <div class="sidebar-metric">
+        <span class="sidebar-metric-label">등록 공간</span>
+        <strong class="sidebar-metric-value">{{ operations_summary.space_count }}</strong>
+      </div>
+      <div class="sidebar-metric">
+        <span class="sidebar-metric-label">활성 공간</span>
+        <strong class="sidebar-metric-value">{{ operations_summary.enabled_space_count }}</strong>
+      </div>
+      <div class="sidebar-metric">
+        <span class="sidebar-metric-label">활성 스케줄</span>
+        <strong class="sidebar-metric-value">{{ operations_summary.enabled_schedule_count }}</strong>
+      </div>
+      <div class="sidebar-metric">
+        <span class="sidebar-metric-label">지금 실행 가능</span>
+        <strong class="sidebar-metric-value">{{ operations_summary.due_schedule_count }}</strong>
+      </div>
+    </div>
+  </section>
+
+  <section class="history-panel">
+    <div class="section-header">
+      <h2>공간 등록</h2>
+    </div>
+    <form class="editor-form admin-user-form admin-operations-form" action="/admin/spaces" method="post">
+      <label>
+        <span>Space Key</span>
+        <input class="login-input" type="text" name="space_key" placeholder="예: DXT" required />
+      </label>
+      <label>
+        <span>표시 이름</span>
+        <input class="login-input" type="text" name="name" placeholder="예: Device Experience Team" />
+      </label>
+      <label>
+        <span>Bootstrap Root Page ID</span>
+        <input class="login-input" type="text" name="root_page_id" placeholder="예: 3260649300" />
+      </label>
+      <label class="admin-checkbox">
+        <input type="checkbox" name="enabled" checked />
+        <span>공간 활성화</span>
+      </label>
+      <div class="editor-actions">
+        <button type="submit" class="hero-link">공간 저장</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="history-panel">
+    <div class="section-header">
+      <h2>Bootstrap 대상</h2>
+    </div>
+    <ul class="page-list history-list admin-space-list">
+      {% for row in operation_rows %}
+      <li class="admin-space-item">
+        <div class="admin-space-head">
+          <div>
+            <strong>{{ row.name }}</strong>
+            <span class="page-meta"> · {{ row.space_key }}</span>
+          </div>
+          <span class="page-meta">Bootstrap {{ row.last_bootstrap_at }} · Incremental {{ row.last_incremental_at }}</span>
+        </div>
+        <form class="admin-space-grid" action="/admin/spaces" method="post">
+          <input type="hidden" name="space_key" value="{{ row.space_key }}" />
+          <label>
+            <span>표시 이름</span>
+            <input class="login-input" type="text" name="name" value="{{ row.name }}" />
+          </label>
+          <label>
+            <span>Root Page ID</span>
+            <input class="login-input" type="text" name="root_page_id" value="{{ row.root_page_id }}" />
+          </label>
+          <label class="admin-checkbox">
+            <input type="checkbox" name="enabled" {% if row.enabled %}checked{% endif %} />
+            <span>활성 공간</span>
+          </label>
+          <div class="admin-inline-actions">
+            <button type="submit" class="source-link source-button">설정 저장</button>
+          </div>
+        </form>
+        <div class="admin-inline-actions">
+          <form class="page-action-form" action="/admin/spaces/{{ row.space_key }}/bootstrap" method="post">
+            <button type="submit" class="hero-link">Bootstrap 실행</button>
+          </form>
+          <form class="page-action-form" action="/admin/spaces/{{ row.space_key }}/sync" method="post">
+            <button type="submit" class="source-link source-button">증분 동기화 실행</button>
+          </form>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <section class="history-panel">
+    <div class="section-header">
+      <h2>증분 동기화 스케줄</h2>
+    </div>
+    <ul class="page-list history-list admin-space-list">
+      {% for row in operation_rows %}
+      <li class="admin-space-item">
+        <div class="admin-space-head">
+          <div>
+            <strong>{{ row.name }}</strong>
+            <span class="page-meta"> · {{ row.space_key }}</span>
+          </div>
+          <span class="page-meta">다음 실행 {{ row.schedule.next_run_at }} · 마지막 실행 {{ row.schedule.last_triggered_label }}</span>
+        </div>
+        <form class="admin-space-grid" action="/admin/spaces/{{ row.space_key }}/schedule" method="post">
+          <label class="admin-checkbox">
+            <input type="checkbox" name="enabled" {% if row.schedule.enabled %}checked{% endif %} />
+            <span>증분 스케줄 활성화</span>
+          </label>
+          <label>
+            <span>실행 시각</span>
+            <input class="login-input" type="time" name="run_time" value="{{ row.schedule.run_time }}" required />
+          </label>
+          <label>
+            <span>시간대</span>
+            <input class="login-input" type="text" name="timezone" value="{{ row.schedule.timezone }}" required />
+          </label>
+          <div class="admin-inline-actions">
+            <button type="submit" class="source-link source-button">스케줄 저장</button>
+          </div>
+        </form>
+        <div class="page-meta">
+          상태 {{ row.schedule.last_status or '미실행' }}
+          {% if row.schedule.last_error_message %}
+          · {{ row.schedule.last_error_message }}
+          {% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    <div class="admin-inline-actions">
+      <form class="page-action-form" action="/admin/schedules/run-due-now" method="post">
+        <button type="submit" class="hero-link">지금 실행 가능한 스케줄 실행</button>
+      </form>
+    </div>
+  </section>
+
+  <section class="history-panel">
+    <div class="section-header">
+      <h2>외부 스케줄러</h2>
+    </div>
+    <p class="page-summary">
+      인앱 스케줄러는 돌리지 않고, 외부 스케줄러가 아래 endpoint를 주기적으로 호출하는 구조입니다.
+    </p>
+    <div class="history-banner">
+      <span><strong>Endpoint</strong> POST <code>/admin/schedules/run-due</code></span>
+      <span><strong>권장 주기</strong> 15분~30분</span>
+      <span><strong>기본 시간대</strong> {{ operations_summary.app_timezone }}</span>
+    </div>
+  </section>
+</article>
+{% endblock %}

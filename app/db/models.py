@@ -12,6 +12,18 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), default="viewer", nullable=False, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class Space(Base):
     __tablename__ = "spaces"
 
@@ -27,6 +39,7 @@ class Space(Base):
 
     pages: Mapped[list["Page"]] = relationship(back_populates="space")
     knowledge_documents: Mapped[list["KnowledgeDocument"]] = relationship(back_populates="space")
+    sync_schedules: Mapped[list["SyncSchedule"]] = relationship(back_populates="space")
 
 
 class Page(Base):
@@ -119,6 +132,24 @@ class SyncCursor(Base):
     cursor_type: Mapped[str] = mapped_column(String(50), nullable=False)
     cursor_value: Mapped[str] = mapped_column(String(255), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class SyncSchedule(Base):
+    __tablename__ = "sync_schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"), nullable=False, index=True)
+    schedule_type: Mapped[str] = mapped_column(String(50), default="incremental", nullable=False, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    run_time: Mapped[str] = mapped_column(String(5), default="03:00", nullable=False)
+    timezone: Mapped[str] = mapped_column(String(64), default="Asia/Seoul", nullable=False)
+    last_triggered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    space: Mapped[Space] = relationship(back_populates="sync_schedules")
 
 
 class WikiDocument(Base):

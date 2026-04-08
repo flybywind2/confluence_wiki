@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0", alias="APP_HOST")
     app_port: int = Field(default=8000, alias="APP_PORT")
     app_timezone: str = Field(default="Asia/Seoul", alias="APP_TIMEZONE")
+    auth_secret_key: str = Field(default="dev-secret-key", alias="AUTH_SECRET_KEY")
+    auth_bootstrap_admin_username: str = Field(default="admin", alias="AUTH_BOOTSTRAP_ADMIN_USERNAME")
+    auth_bootstrap_admin_password: str = Field(default="admin-pass", alias="AUTH_BOOTSTRAP_ADMIN_PASSWORD")
+    auth_bootstrap_editor_username: str = Field(default="editor", alias="AUTH_BOOTSTRAP_EDITOR_USERNAME")
+    auth_bootstrap_editor_password: str = Field(default="editor-pass", alias="AUTH_BOOTSTRAP_EDITOR_PASSWORD")
+    auth_bootstrap_viewer_username: str = Field(default="viewer", alias="AUTH_BOOTSTRAP_VIEWER_USERNAME")
+    auth_bootstrap_viewer_password: str = Field(default="viewer-pass", alias="AUTH_BOOTSTRAP_VIEWER_PASSWORD")
 
     conf_mirror_base_url: str = Field(alias="CONF_MIRROR_BASE_URL")
     conf_prod_base_url: str = Field(alias="CONF_PROD_BASE_URL")

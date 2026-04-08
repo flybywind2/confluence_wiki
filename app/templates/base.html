@@ -10,11 +10,29 @@
   <body
     data-selected-space="{{ selected_space or 'all' }}"
     data-selected-space-name="{{ selected_space_name or '전체 위키' }}"
+    data-can-edit="{{ 'true' if can_edit else 'false' }}"
   >
     <div class="page-shell">
       <aside class="sidebar">
         <a class="brand" href="/">Confluence Wiki</a>
         <p class="brand-subtitle">Mirror Sync Knowledge Atlas</p>
+        {% if current_user %}
+        <section class="sidebar-userbox" aria-label="로그인 사용자">
+          <div class="sidebar-title">사용자</div>
+          <div class="sidebar-user-meta">
+            <strong>{{ current_user.username }}</strong>
+            <span>{{ current_user_role_label }}</span>
+          </div>
+          <div class="sidebar-user-actions">
+            {% if can_admin %}
+            <a href="/admin/operations" class="source-link">운영 관리</a>
+            <a href="/admin/users" class="source-link">사용자 관리</a>
+            {% endif %}
+            <form action="/auth/logout" method="post">
+              <button type="submit" class="source-link source-button">로그아웃</button>
+            </form>
+          </div>
+        </section>
         <nav class="sidebar-nav">
           <a href="/">문서 홈</a>
           <a href="/graph{% if selected_space and selected_space != 'all' %}?space={{ selected_space }}{% endif %}">Graph View</a>
@@ -23,14 +41,40 @@
           <input type="text" name="q" placeholder="문서 검색" value="{{ search_query or '' }}" />
           <div class="search-actions">
             <button type="submit" class="sidebar-action-button">검색</button>
+            {% if can_edit %}
             <button type="button" class="sidebar-action-button" id="query-generator-open">위키 생성</button>
+            {% endif %}
           </div>
         </form>
+        <section class="sidebar-metrics" aria-label="참고 정보">
+          <div class="sidebar-title">참고 정보</div>
+          <div class="sidebar-metric-grid">
+            <div class="sidebar-metric">
+              <span class="sidebar-metric-label">원본 문서 수</span>
+              <strong class="sidebar-metric-value">{{ sidebar_metrics.raw_page_count if sidebar_metrics else 0 }}</strong>
+            </div>
+            <div class="sidebar-metric">
+              <span class="sidebar-metric-label">지식 문서 수</span>
+              <strong class="sidebar-metric-value">{{ sidebar_metrics.knowledge_count if sidebar_metrics else 0 }}</strong>
+            </div>
+            <div class="sidebar-metric">
+              <span class="sidebar-metric-label">참조 공간 수</span>
+              <strong class="sidebar-metric-value">{{ sidebar_metrics.source_space_count if sidebar_metrics else 0 }}</strong>
+            </div>
+          </div>
+        </section>
+        {% else %}
+        <div class="sidebar-login-hint">
+          <p>로그인 후 문서 조회와 위키 기능을 사용할 수 있습니다.</p>
+          <a class="hero-link" href="/login">로그인</a>
+        </div>
+        {% endif %}
       </aside>
       <main class="content">
         {% block content %}{% endblock %}
       </main>
     </div>
+    {% if current_user %}
     <button
       type="button"
       class="assistant-fab"
@@ -91,6 +135,7 @@
       </form>
     </section>
     <script src="/static/wiki-assistant.js"></script>
+    {% if can_edit %}
     <div class="query-generator-backdrop" id="query-generator-backdrop" hidden></div>
     <section
       class="query-generator-modal"
@@ -131,6 +176,23 @@
           <ul class="query-generator-events" id="query-generator-events"></ul>
           <a class="source-link query-generator-result" id="query-generator-result" href="#" hidden>생성된 위키 보기</a>
         </div>
+        <section class="query-generator-queue" aria-label="생성 큐">
+          <div class="query-generator-queue-summary" id="query-generator-queue-summary">현재 대기열이 없습니다.</div>
+          <div class="query-generator-queue-columns">
+            <div class="query-generator-queue-column">
+              <h3>실행 중</h3>
+              <ul class="query-generator-queue-list" id="query-generator-running-list"></ul>
+            </div>
+            <div class="query-generator-queue-column">
+              <h3>대기열</h3>
+              <ul class="query-generator-queue-list" id="query-generator-queued-list"></ul>
+            </div>
+            <div class="query-generator-queue-column">
+              <h3>최근 작업</h3>
+              <ul class="query-generator-queue-list" id="query-generator-recent-list"></ul>
+            </div>
+          </div>
+        </section>
         <div class="query-generator-actions">
           <span class="query-generator-inline-status" id="query-generator-inline-status"></span>
           <button type="submit" class="assistant-submit" id="query-generator-submit">생성 시작</button>
@@ -138,5 +200,7 @@
       </form>
     </section>
     <script src="/static/query-generator.js"></script>
+    {% endif %}
+    {% endif %}
   </body>
 </html>

@@ -96,7 +96,17 @@ class SyncService:
             descendants = await self.confluence_client.fetch_descendant_pages(root_page_id)
         page_ids = [root_page_id, *[item["id"] for item in descendants if item["id"] != root_page_id]]
         logger.info("bootstrap start space=%s root_page_id=%s pages=%s", space_key, root_page_id, len(page_ids))
-        return await self._sync_pages(space_key=space_key, page_ids=page_ids, mode="bootstrap", root_page_id=root_page_id)
+        result = await self._sync_pages(space_key=space_key, page_ids=page_ids, mode="bootstrap", root_page_id=root_page_id)
+        session = self.session_factory()
+        try:
+            space = session.scalar(select(Space).where(Space.space_key == space_key))
+            if space is not None:
+                space.root_page_id = root_page_id
+                space.last_bootstrap_at = self._utcnow()
+                session.commit()
+        finally:
+            session.close()
+        return result
 
     async def _run_incremental(self, space_key: str, now: datetime | None) -> SyncResult:
         timezone = ZoneInfo(self.settings.app_timezone)
@@ -112,13 +122,22 @@ class SyncService:
             end.isoformat(),
             len(page_ids),
         )
-        return await self._sync_pages(
+        result = await self._sync_pages(
             space_key=space_key,
             page_ids=page_ids,
             mode="incremental",
             root_page_id=None,
             window_label=f"{start.isoformat()} ~ {end.isoformat()}",
         )
+        session = self.session_factory()
+        try:
+            space = session.scalar(select(Space).where(Space.space_key == space_key))
+            if space is not None:
+                space.last_incremental_at = self._utcnow()
+                session.commit()
+        finally:
+            session.close()
+        return result
 
     async def _sync_pages(
         self,

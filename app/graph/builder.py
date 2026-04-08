@@ -22,7 +22,7 @@ def _kind_color(kind: str, space_key: str) -> str:
         "keyword": "#0f766e",
         "analysis": "#9a3412",
         "query": "#7c3aed",
-        "page": _space_color(space_key),
+        "page": "#64748b",
     }.get(kind, _space_color(space_key))
 
 

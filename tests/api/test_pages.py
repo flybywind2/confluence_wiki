@@ -3,7 +3,7 @@ from sqlalchemy import select
 
 from app.core.config import Settings
 from app.core.markdown import read_markdown_document
-from app.db.models import Page, PageVersion
+from app.db.models import KnowledgeDocument, Page, PageVersion, Space
 from app.db.session import create_session_factory
 from app.demo_seed import seed_demo_content
 from app.services.knowledge_service import KnowledgeService
@@ -11,14 +11,48 @@ from app.main import app, create_app
 from app.services.wiki_writer import write_markdown_file
 
 
+def _login(client: TestClient, role: str = "viewer") -> None:
+    password = {
+        "viewer": "viewer-pass",
+        "editor": "editor-pass",
+        "admin": "admin-pass",
+    }[role]
+    response = client.post(
+        "/auth/login",
+        data={"username": role, "password": password},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+
 def test_index_page_hides_space_selector_and_document_kind_filter():
     client = TestClient(app)
+    _login(client, "viewer")
     response = client.get("/")
 
     assert response.status_code == 200
     assert '<div class="sidebar-title">Space</div>' not in response.text
     assert ">문서 유형<" not in response.text
     assert "위키에게 묻기" in response.text
+
+
+def test_sidebar_shows_reference_metrics(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "참고 정보" in response.text
+    assert "원본 문서 수" in response.text
+    assert "지식 문서 수" in response.text
+    assert "참조 공간 수" in response.text
+    assert 'class="sidebar-metric-value">4<' in response.text
+    assert 'class="sidebar-metric-value">2<' in response.text
 
 
 def test_sidebar_search_and_generate_buttons_share_primary_action_style(tmp_path, sample_settings_dict):
@@ -28,12 +62,38 @@ def test_sidebar_search_and_generate_buttons_share_primary_action_style(tmp_path
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "editor")
     response = client.get("/")
 
     assert response.status_code == 200
     assert 'class="sidebar-action-button"' in response.text
     assert 'id="query-generator-open"' in response.text
     assert ">위키 생성</button>" in response.text
+    assert 'id="query-generator-queue-summary"' in response.text
+    assert 'id="query-generator-queued-list"' in response.text
+
+
+def test_home_page_renders_summary_rail_without_quick_generation_panel(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "핵심 주제" in response.text
+    assert "최근 반영된 원문" in response.text
+    assert "빠른 생성" not in response.text
+    assert 'data-query-seed="' not in response.text
+    assert "/knowledge/keywords/" in response.text
+    assert "/spaces/DEMO/pages/" in response.text
+    assert 'class="home-dashboard-shell"' in response.text
+    assert 'class="hero-card home-dashboard-hero"' in response.text
+    assert '<div class="home-primary">\n    <section class="hero-card home-dashboard-hero">' in response.text
+    assert 'class="list-card dashboard-list-card"' in response.text
 
 
 def test_wiki_static_route_serves_space_assets(tmp_path, sample_settings_dict):
@@ -58,6 +118,7 @@ def test_search_page_shows_query_context_and_result_count(tmp_path, sample_setti
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
     response = client.get("/search?q=런북&space=DEMO")
 
     assert response.status_code == 200
@@ -73,6 +134,7 @@ def test_space_home_can_filter_by_kind_and_recent_group(tmp_path, sample_setting
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
     response = client.get("/spaces/DEMO", params={"kind": "keyword", "recent": "7d"})
 
     assert response.status_code == 200
@@ -87,6 +149,7 @@ def test_ui_uses_space_names_instead_of_keys(tmp_path, sample_settings_dict):
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
 
     home = client.get("/")
     assert home.status_code == 200
@@ -105,6 +168,7 @@ def test_search_page_shows_empty_state_for_no_results(tmp_path, sample_settings_
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
     response = client.get("/search?q=없는문서&space=DEMO")
 
     assert response.status_code == 200
@@ -118,6 +182,7 @@ def test_page_view_renders_breadcrumb_and_meta_description(tmp_path, sample_sett
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
     response = client.get("/spaces/DEMO/pages/demo-home-9001")
 
     assert response.status_code == 200
@@ -134,6 +199,7 @@ def test_page_view_exposes_history_navigation(tmp_path, sample_settings_dict):
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
     response = client.get("/spaces/DEMO/pages/demo-home-9001")
 
     assert response.status_code == 200
@@ -148,6 +214,7 @@ def test_history_routes_render_revision_list_and_snapshot(tmp_path, sample_setti
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
 
     history = client.get("/spaces/DEMO/pages/demo-home-9001/history")
     assert history.status_code == 200
@@ -166,6 +233,7 @@ def test_space_home_links_to_synthesis_page(tmp_path, sample_settings_dict):
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
     response = client.get("/spaces/DEMO")
 
     assert response.status_code == 200
@@ -179,6 +247,7 @@ def test_synthesis_route_renders_space_summary(tmp_path, sample_settings_dict):
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
     response = client.get("/spaces/DEMO/synthesis")
 
     assert response.status_code == 200
@@ -194,6 +263,7 @@ def test_graph_page_renders_navigation_controls_and_scope_selector_without_synth
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
     response = client.get("/graph?space=DEMO&view=knowledge")
 
     assert response.status_code == 200
@@ -204,6 +274,12 @@ def test_graph_page_renders_navigation_controls_and_scope_selector_without_synth
     assert ">전체 그래프<" in response.text
     assert "Demo Showcase" in response.text
     assert 'name="space"' in response.text
+    assert "노드 범례" in response.text
+    assert "키워드 문서" in response.text
+    assert "검색 위키" in response.text
+    assert "분석 문서" in response.text
+    assert "원문 페이지" in response.text
+    assert "링크 범례" in response.text
     assert "Keyword Source" in response.text
     assert "Keyword Related" in response.text
     assert "Synthesis" not in response.text
@@ -216,6 +292,7 @@ def test_knowledge_route_renders_global_keyword_page(tmp_path, sample_settings_d
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
     response = client.get("/knowledge/keywords/운영-대시보드")
 
     assert response.status_code == 200
@@ -230,6 +307,7 @@ def test_knowledge_page_shows_edit_link_and_raw_page_does_not(tmp_path, sample_s
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "editor")
 
     knowledge_response = client.get("/knowledge/keywords/운영-대시보드")
     assert knowledge_response.status_code == 200
@@ -247,11 +325,15 @@ def test_generated_knowledge_page_shows_regenerate_action(tmp_path, sample_setti
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "editor")
     response = client.get("/knowledge/keywords/운영-대시보드")
 
     assert response.status_code == 200
     assert 'action="/knowledge/keywords/%EC%9A%B4%EC%98%81-%EB%8C%80%EC%8B%9C%EB%B3%B4%EB%93%9C/regenerate"' in response.text
     assert "LLM 재작성" in response.text
+    assert 'data-queue-regenerate="true"' in response.text
+    assert 'data-regenerate-kind="keyword"' in response.text
+    assert 'data-regenerate-slug="운영-대시보드"' in response.text
 
 
 def test_analysis_knowledge_page_shows_llm_regenerate_action(tmp_path, sample_settings_dict):
@@ -278,6 +360,7 @@ def test_analysis_knowledge_page_shows_llm_regenerate_action(tmp_path, sample_se
     )
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "editor")
     response = client.get(result["href"])
 
     assert response.status_code == 200
@@ -293,6 +376,7 @@ def test_global_keyword_page_shows_clickable_original_confluence_link(tmp_path, 
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
     response = client.get("/knowledge/keywords/운영-대시보드")
 
     assert response.status_code == 200
@@ -307,12 +391,65 @@ def test_keyword_knowledge_page_shows_clickable_original_confluence_links(tmp_pa
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
     response = client.get("/knowledge/keywords/운영-대시보드")
 
     assert response.status_code == 200
     assert 'href="https://prod.example.com/confluence/pages/viewpage.action?pageId=9001"' in response.text
     assert 'href="https://prod.example.com/confluence/pages/viewpage.action?pageId=9002"' in response.text
     assert response.text.count(">Confluence 원문<") >= 2
+
+
+def test_knowledge_page_renders_inline_source_citations_and_numbered_evidence(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    session = create_session_factory(settings.database_url)()
+    try:
+        global_space = session.scalar(select(Space).where(Space.space_key == "__global__"))
+        document = session.scalar(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.space_id == global_space.id,
+                KnowledgeDocument.kind == "keyword",
+                KnowledgeDocument.slug == "운영-대시보드",
+            )
+        )
+        document.source_refs = "[[spaces/DEMO/pages/ops-dashboard-9002|운영 대시보드]]"
+        session.commit()
+    finally:
+        session.close()
+
+    keyword_file = tmp_path / "wiki" / "global" / "knowledge" / "keywords" / "운영-대시보드.md"
+    frontmatter, _body = read_markdown_document(keyword_file)
+    write_markdown_file(
+        keyword_file,
+        frontmatter,
+        "\n".join(
+            [
+                "# 운영 대시보드",
+                "",
+                "## 핵심 사실",
+                "",
+                "- 문서 수와 그래프 링크를 함께 확인한다.",
+                "- 이미지 처리 상태를 wiki-static 노출 기준으로 점검한다.",
+            ]
+        ),
+    )
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
+    response = client.get("/knowledge/keywords/운영-대시보드")
+
+    assert response.status_code == 200
+    assert "원문 근거" in response.text
+    assert 'class="inline-source-citation"' in response.text
+    assert 'class="inline-source-date">2026-04-05<' in response.text
+    assert "source-evidence-list" in response.text
+    assert 'id="source-evidence-1"' in response.text
+    assert 'class="source-evidence-date">2026-04-05<' in response.text
+    assert 'href="https://prod.example.com/confluence/pages/viewpage.action?pageId=9002"' in response.text
 
 
 def test_knowledge_edit_form_renders_markdown_body(tmp_path, sample_settings_dict):
@@ -322,6 +459,7 @@ def test_knowledge_edit_form_renders_markdown_body(tmp_path, sample_settings_dic
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "editor")
     response = client.get("/knowledge/keywords/운영-대시보드/edit")
 
     assert response.status_code == 200
@@ -336,6 +474,7 @@ def test_knowledge_edit_save_updates_rendered_content(tmp_path, sample_settings_
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "editor")
     new_body = "# 운영 대시보드\n\n수정된 본문입니다.\n\n- 새 메모"
 
     response = client.post(
@@ -367,6 +506,7 @@ def test_keyword_regenerate_route_rebuilds_single_document_from_current_raw_sour
     write_markdown_file(raw_page_path, frontmatter, updated_body)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "editor")
     response = client.post(
         "/knowledge/keywords/운영-대시보드/regenerate",
         data={"selected_space": "DEMO"},
@@ -411,6 +551,7 @@ def test_analysis_regenerate_route_rewrites_answer_from_current_raw_sources(tmp_
     )
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "editor")
     response = client.post(f'{result["href"]}/regenerate', data={"selected_space": "DEMO"}, follow_redirects=False)
 
     assert response.status_code == 303
@@ -426,6 +567,7 @@ def test_query_page_renders_under_canonical_query_route(tmp_path, sample_setting
     seed_demo_content(settings)
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "editor")
     build_response = client.post("/api/wiki-from-query", json={"query": "운영 대시보드"})
     assert build_response.status_code == 200
     href = build_response.json()["href"]
@@ -455,6 +597,7 @@ def test_history_route_backfills_current_version_when_snapshot_path_is_missing(t
     history_file.unlink()
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
     response = client.get("/spaces/DEMO/pages/demo-home-9001/history/1")
 
     assert response.status_code == 200

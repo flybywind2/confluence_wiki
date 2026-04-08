@@ -4,6 +4,20 @@ from app.core.config import Settings
 from app.main import create_app
 
 
+def _login(client: TestClient, role: str = "viewer") -> None:
+    password = {
+        "viewer": "viewer-pass",
+        "editor": "editor-pass",
+        "admin": "admin-pass",
+    }[role]
+    response = client.post(
+        "/auth/login",
+        data={"username": role, "password": password},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+
 def test_demo_seed_populates_pages_assets_and_graph(tmp_path, sample_settings_dict):
     from app.demo_seed import seed_demo_content
 
@@ -17,12 +31,13 @@ def test_demo_seed_populates_pages_assets_and_graph(tmp_path, sample_settings_di
     assert result["pages"] == 4
 
     client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
 
     home = client.get("/")
     assert home.status_code == 200
     assert "운영" in home.text
     assert "핵심 개념" not in home.text
-    assert "ARCH" in home.text
+    assert "Architecture Notes" in home.text
 
     page = client.get("/spaces/DEMO/pages/demo-home-9001")
     assert page.status_code == 200
@@ -66,6 +81,10 @@ def test_demo_seed_populates_pages_assets_and_graph(tmp_path, sample_settings_di
     knowledge_page = client.get("/knowledge/keywords/운영-대시보드")
     assert knowledge_page.status_code == 200
     assert "키워드 문서" in knowledge_page.text
+    assert 'class="inline-source-citation"' in knowledge_page.text
+    assert "source-evidence-list" in knowledge_page.text
+    assert "2026-04-06" in knowledge_page.text
+    assert "2026-04-05" in knowledge_page.text
 
     lint_page = client.get("/knowledge/lint/report")
     assert lint_page.status_code == 200

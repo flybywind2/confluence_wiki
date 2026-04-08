@@ -9,6 +9,7 @@
   const status = document.getElementById("assistant-status");
   const submitButton = form?.querySelector(".assistant-submit");
   const selectedSpace = document.body.dataset.selectedSpace || "all";
+  const canEdit = document.body.dataset.canEdit === "true";
 
   if (!fab || !modal || !backdrop || !form || !questionInput || !thread || !status || !submitButton) return;
 
@@ -35,6 +36,14 @@
   const createSaveButton = (question, payload) => {
     const actionRow = document.createElement("div");
     actionRow.className = "assistant-answer-actions";
+
+    if (!canEdit) {
+      const note = document.createElement("span");
+      note.className = "assistant-save-note";
+      note.textContent = "조회 권한에서는 분석 문서를 저장할 수 없습니다.";
+      actionRow.appendChild(note);
+      return actionRow;
+    }
 
     if (selectedSpace === "all") {
       const note = document.createElement("span");

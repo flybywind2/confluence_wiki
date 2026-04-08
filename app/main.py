@@ -7,10 +7,12 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
+from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.routes import router
 from app.core.config import Settings, get_settings
 from app.db.session import create_session_factory
+from app.services.auth_service import ensure_bootstrap_users
 from app.services.query_jobs import QueryJobManager
 
 
@@ -54,10 +56,18 @@ def create_app(settings: Settings | None = None, allow_test_fallback: bool | Non
     settings.cache_root.mkdir(parents=True, exist_ok=True)
 
     app = FastAPI(title="Confluence Wiki")
+    app.add_middleware(SessionMiddleware, secret_key=settings.auth_secret_key, same_site="lax")
     app.state.settings = settings
     app.state.session_factory = create_session_factory(settings.database_url)
     app.state.templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
     app.state.query_jobs = QueryJobManager(settings)
+
+    bootstrap_session = app.state.session_factory()
+    try:
+        ensure_bootstrap_users(bootstrap_session, settings)
+        bootstrap_session.commit()
+    finally:
+        bootstrap_session.close()
 
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
     app.mount("/wiki-static", StaticFiles(directory=str(settings.wiki_root)), name="wiki-static")

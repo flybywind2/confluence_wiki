@@ -6,8 +6,23 @@ from app.main import app, create_app
 from app.services.sync_service import SyncResult, SyncService
 
 
+def _login(client: TestClient, role: str = "viewer") -> None:
+    password = {
+        "viewer": "viewer-pass",
+        "editor": "editor-pass",
+        "admin": "admin-pass",
+    }[role]
+    response = client.post(
+        "/auth/login",
+        data={"username": role, "password": password},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+
+
 def test_graph_endpoint_returns_nodes_and_edges():
     client = TestClient(app)
+    _login(client, "viewer")
     response = client.get("/api/graph")
 
     assert response.status_code == 200
@@ -48,14 +63,14 @@ def test_home_page_shows_knowledge_docs_by_default(tmp_path, sample_settings_dic
     test_app = create_app(settings=settings, allow_test_fallback=False)
     seed_demo_content(settings=settings)
     client = TestClient(test_app)
+    _login(client, "viewer")
 
     response = client.get("/")
 
     assert response.status_code == 200
     assert "운영" in response.text
     assert "핵심 개념" not in response.text
-    assert "Confluence Wiki Demo 홈" not in response.text
-    assert 'href="/spaces/DEMO/pages/ops-dashboard-9002"' not in response.text
+    assert "최근 반영된 원문" in response.text
 
 
 def test_search_prefers_knowledge_docs_and_hides_raw_pages_by_default(tmp_path, sample_settings_dict):
@@ -70,6 +85,7 @@ def test_search_prefers_knowledge_docs_and_hides_raw_pages_by_default(tmp_path, 
     test_app = create_app(settings=settings, allow_test_fallback=False)
     seed_demo_content(settings=settings)
     client = TestClient(test_app)
+    _login(client, "viewer")
 
     response = client.get("/search", params={"q": "런북", "space": "DEMO"})
 
@@ -90,6 +106,7 @@ def test_graph_endpoint_can_return_knowledge_graph_nodes(tmp_path, sample_settin
     test_app = create_app(settings=settings, allow_test_fallback=False)
     seed_demo_content(settings=settings)
     client = TestClient(test_app)
+    _login(client, "viewer")
 
     response = client.get("/api/graph", params={"space": "DEMO", "view": "knowledge"})
 
@@ -111,6 +128,7 @@ def test_query_generation_creates_query_document(tmp_path, sample_settings_dict)
     test_app = create_app(settings=settings, allow_test_fallback=False)
     seed_demo_content(settings=settings)
     client = TestClient(test_app)
+    _login(client, "editor")
 
     response = client.post("/api/wiki-from-query", json={"query": "운영 대시보드"})
 
@@ -132,6 +150,7 @@ def test_sidebar_query_generation_form_redirects_to_query_page(tmp_path, sample_
     test_app = create_app(settings=settings, allow_test_fallback=False)
     seed_demo_content(settings=settings)
     client = TestClient(test_app)
+    _login(client, "editor")
 
     response = client.post("/knowledge/generate", data={"q": "운영 대시보드"}, follow_redirects=False)
 
@@ -151,6 +170,7 @@ def test_sidebar_query_generation_form_redirects_back_when_query_is_missing(tmp_
     test_app = create_app(settings=settings, allow_test_fallback=False)
     seed_demo_content(settings=settings)
     client = TestClient(test_app)
+    _login(client, "editor")
 
     response = client.post("/knowledge/generate", data={}, headers={"referer": "/spaces/DEMO"}, follow_redirects=False)
 
@@ -170,6 +190,7 @@ def test_sidebar_query_generation_form_accepts_query_alias_field(tmp_path, sampl
     test_app = create_app(settings=settings, allow_test_fallback=False)
     seed_demo_content(settings=settings)
     client = TestClient(test_app)
+    _login(client, "editor")
 
     response = client.post("/knowledge/generate", data={"query": "운영 대시보드"}, follow_redirects=False)
 
@@ -189,6 +210,7 @@ def test_home_page_separates_search_and_query_generation_ui(tmp_path, sample_set
     test_app = create_app(settings=settings, allow_test_fallback=False)
     seed_demo_content(settings=settings)
     client = TestClient(test_app)
+    _login(client, "editor")
 
     response = client.get("/")
 
@@ -210,6 +232,7 @@ def test_query_job_api_rejects_missing_query(tmp_path, sample_settings_dict):
     test_app = create_app(settings=settings, allow_test_fallback=False)
     seed_demo_content(settings=settings)
     client = TestClient(test_app)
+    _login(client, "editor")
 
     response = client.post("/api/query-jobs", json={})
 
@@ -258,6 +281,7 @@ def test_query_job_api_starts_job_and_returns_status(tmp_path, sample_settings_d
 
     test_app.state.query_jobs = FakeQueryJobs()
     client = TestClient(test_app)
+    _login(client, "editor")
 
     create_response = client.post("/api/query-jobs", json={"query": "운영 대시보드", "selected_space": "DEMO"})
     status_response = client.get("/api/query-jobs/job-123")
@@ -268,3 +292,102 @@ def test_query_job_api_starts_job_and_returns_status(tmp_path, sample_settings_d
     assert status_response.status_code == 200
     assert status_response.json()["status"] == "completed"
     assert status_response.json()["href"] == "/knowledge/queries/운영-대시보드"
+
+
+def test_query_job_api_lists_queue_overview(tmp_path, sample_settings_dict):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+        }
+    )
+    test_app = create_app(settings=settings, allow_test_fallback=False)
+    seed_demo_content(settings=settings)
+
+    class FakeQueryJobs:
+        def list_jobs(self):
+            return {
+                "running": {
+                    "id": "job-1",
+                    "query": "Codex",
+                    "status": "running",
+                    "message": "생성 중입니다.",
+                    "progress": 40,
+                },
+                "queued": [
+                    {
+                        "id": "job-2",
+                        "query": "MCP",
+                        "status": "queued",
+                        "message": "대기 중입니다.",
+                        "progress": 0,
+                    }
+                ],
+                "recent": [
+                    {
+                        "id": "job-0",
+                        "query": "LLM Wiki",
+                        "status": "completed",
+                        "message": "완료되었습니다.",
+                        "progress": 100,
+                        "href": "/knowledge/queries/llm-wiki",
+                    }
+                ],
+            }
+
+    test_app.state.query_jobs = FakeQueryJobs()
+    client = TestClient(test_app)
+    _login(client, "viewer")
+
+    response = client.get("/api/query-jobs")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["running"]["query"] == "Codex"
+    assert payload["queued"][0]["query"] == "MCP"
+    assert payload["recent"][0]["href"] == "/knowledge/queries/llm-wiki"
+
+
+def test_regenerate_job_api_starts_knowledge_job(tmp_path, sample_settings_dict):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+        }
+    )
+    test_app = create_app(settings=settings, allow_test_fallback=False)
+    seed_demo_content(settings=settings)
+
+    class FakeQueryJobs:
+        def start_regenerate_job(self, *, kind: str, slug: str, title: str | None = None, selected_space: str | None = None):
+            return {
+                "id": "regen-1",
+                "query": title or slug,
+                "job_type": "regenerate",
+                "kind": kind,
+                "slug": slug,
+                "selected_space": selected_space,
+                "status": "queued",
+                "message": "재작성 대기열에 추가되었습니다.",
+                "progress": 0,
+            }
+
+    test_app.state.query_jobs = FakeQueryJobs()
+    client = TestClient(test_app)
+    _login(client, "editor")
+
+    response = client.post(
+        "/api/query-jobs/knowledge",
+        json={"kind": "keyword", "slug": "운영-대시보드", "title": "운영 대시보드", "selected_space": "DEMO"},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["id"] == "regen-1"
+    assert payload["job_type"] == "regenerate"
+    assert payload["kind"] == "keyword"
+    assert payload["slug"] == "운영-대시보드"

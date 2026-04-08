@@ -46,7 +46,16 @@
         <a class="source-link" href="{{ edit_href }}">편집</a>
         {% endif %}
         {% if regenerate_href %}
-        <form class="page-action-form" action="{{ regenerate_href }}" method="post">
+        <form
+          class="page-action-form"
+          action="{{ regenerate_href }}"
+          method="post"
+          data-queue-regenerate="true"
+          data-regenerate-kind="{{ regenerate_kind or page_kind }}"
+          data-regenerate-slug="{{ page.slug }}"
+          data-regenerate-title="{{ page.title }}"
+          data-regenerate-space="{{ regenerate_selected_space or '' }}"
+        >
           <input type="hidden" name="selected_space" value="{{ regenerate_selected_space or '' }}">
           <button class="source-link source-button" type="submit">{{ regenerate_label or '다시 생성' }}</button>
         </form>
@@ -64,18 +73,21 @@
   {% if source_links %}
   <section class="history-panel">
     <div class="section-header">
-      <h2>원본 링크</h2>
+      <h2>원문 근거</h2>
     </div>
-    <ul class="page-list history-list">
+    <ol class="page-list history-list source-evidence-list">
       {% for source in source_links %}
-      <li>
-        <span>{{ source.title }}</span>
+      <li id="{{ source.anchor_id }}" class="source-evidence-item">
+        <span class="source-evidence-title">{{ source.title }}</span>
         <span class="page-meta">
+          {% if source.updated_at_label %}
+          <span class="source-evidence-date">{{ source.updated_at_label }}</span>
+          {% endif %}
           <a class="source-link" href="{{ source.prod_url }}" target="_blank" rel="noreferrer">Confluence 원문</a>
         </span>
       </li>
       {% endfor %}
-    </ul>
+    </ol>
   </section>
   {% endif %}
   {% if history_versions %}

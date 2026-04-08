@@ -95,6 +95,48 @@ def _copy_asset(source_name: str, settings: Settings, space_key: str) -> Path:
     return target
 
 
+def _curate_demo_knowledge_examples(session, knowledge_service: KnowledgeService) -> None:
+    global_space = ensure_global_knowledge_space(session)
+    dashboard_doc = session.scalar(
+        select(KnowledgeDocument).where(
+            KnowledgeDocument.space_id == global_space.id,
+            KnowledgeDocument.kind == "keyword",
+            KnowledgeDocument.slug == "운영-대시보드",
+        )
+    )
+    if dashboard_doc is None:
+        return
+    dashboard_doc.source_refs = "\n".join(
+        [
+            "[[spaces/DEMO/pages/demo-home-9001|Confluence Wiki Demo 홈]]",
+            "[[spaces/DEMO/pages/ops-dashboard-9002|운영 대시보드]]",
+        ]
+    )
+    session.flush()
+    curated_body = "\n".join(
+        [
+            "# 운영 대시보드",
+            "",
+            "## 핵심 사실",
+            "",
+            "- 데모 홈은 Space 전환, 원문 보기 버튼, Graph View 진입 동선을 한 화면에서 확인할 수 있게 구성한다.",
+            "- 운영 대시보드는 문서 수 4건, 그래프 링크 6건, 샘플 SVG 노출 상태를 주요 지표로 정리한다.",
+            "",
+            "## 관련 문서",
+            "",
+            "- [[spaces/DEMO/pages/demo-home-9001|Confluence Wiki Demo 홈]]",
+            "- [[spaces/DEMO/pages/ops-dashboard-9002|운영 대시보드]]",
+        ]
+    )
+    knowledge_service.update_document_body_with_session(
+        session,
+        space_key="DEMO",
+        kind="keyword",
+        slug="운영-대시보드",
+        body=curated_body,
+    )
+
+
 def seed_demo_content(settings: Settings | None = None) -> dict[str, int]:
     settings = settings or get_settings()
     session = create_session_factory(settings.database_url)()
@@ -264,6 +306,7 @@ def seed_demo_content(settings: Settings | None = None) -> dict[str, int]:
 
         knowledge_service.rebuild_global_with_session(session)
         lint_service.rebuild_global_with_session(session)
+        _curate_demo_knowledge_examples(session, knowledge_service)
         knowledge_rows = session.scalars(
             select(KnowledgeDocument).where(KnowledgeDocument.space_id == global_space.id)
         ).all()

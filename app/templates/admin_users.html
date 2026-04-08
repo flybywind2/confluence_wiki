@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}사용자 관리{% endblock %}
+{% block content %}
+<article class="page-card admin-card">
+  <header class="page-header">
+    <span class="eyebrow">Admin</span>
+    <h1>사용자 관리</h1>
+    <div class="page-submeta">
+      <span>조회자, 편집자, 관리자 역할을 계정별로 부여합니다.</span>
+    </div>
+  </header>
+
+  <section class="history-panel">
+    <div class="section-header">
+      <h2>새 사용자 추가</h2>
+    </div>
+    <form class="editor-form admin-user-form" action="/admin/users" method="post">
+      <label>
+        <span>아이디</span>
+        <input class="login-input" type="text" name="username" required />
+      </label>
+      <label>
+        <span>비밀번호</span>
+        <input class="login-input" type="password" name="password" required />
+      </label>
+      <label>
+        <span>역할</span>
+        <select class="login-input" name="role">
+          <option value="viewer">viewer</option>
+          <option value="editor">editor</option>
+          <option value="admin">admin</option>
+        </select>
+      </label>
+      <div class="editor-actions">
+        <button type="submit" class="hero-link">사용자 추가</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="history-panel">
+    <div class="section-header">
+      <h2>사용자 목록</h2>
+    </div>
+    <ul class="page-list history-list">
+      {% for user in users %}
+      <li>
+        <div>
+          <strong>{{ user.username }}</strong>
+          <span class="page-meta"> · {{ user.role }}{% if not user.is_active %} · inactive{% endif %}</span>
+        </div>
+        <form class="page-action-form" action="/admin/users/{{ user.id }}/role" method="post">
+          <select class="login-input" name="role">
+            <option value="viewer" {% if user.role == 'viewer' %}selected{% endif %}>viewer</option>
+            <option value="editor" {% if user.role == 'editor' %}selected{% endif %}>editor</option>
+            <option value="admin" {% if user.role == 'admin' %}selected{% endif %}>admin</option>
+          </select>
+          <button type="submit" class="source-link source-button">역할 변경</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+</article>
+{% endblock %}

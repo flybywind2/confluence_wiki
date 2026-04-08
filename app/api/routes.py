@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
+from bs4 import BeautifulSoup
 from fastapi import APIRouter, Form, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from app.core.knowledge import (
     GLOBAL_KNOWLEDGE_SPACE_KEY,
@@ -22,8 +24,11 @@ from app.core.knowledge import (
     source_space_keys,
 )
 from app.core.markdown import read_markdown_body, read_markdown_document, render_markdown
-from app.db.models import KnowledgeDocument, Page, PageVersion, Space, WikiDocument
+from app.db.models import KnowledgeDocument, Page, PageVersion, Space, User, WikiDocument
 from app.graph.builder import build_graph_payload, build_knowledge_graph_payload
+from app.services.auth_service import authenticate_user, create_user, role_allows
+from app.services.schedule_service import ScheduleService
+from app.services.space_registry import upsert_space
 from app.services.wiki_writer import write_markdown_file
 from app.services.knowledge_service import KnowledgeService
 from app.services.sync_service import SyncService
@@ -31,6 +36,7 @@ from app.services.wiki_qa import WikiQAService
 
 router = APIRouter()
 _RAW_PAGE_REF_RE = re.compile(r"(?:/spaces/|spaces/)(?P<space_key>[^/\]]+)/pages/(?P<slug>[^|\]\s]+)")
+_SOURCE_TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 
 
 def _templates(request: Request) -> Jinja2Templates:
@@ -47,6 +53,66 @@ def _settings(request: Request):
 
 def _query_jobs(request: Request):
     return request.app.state.query_jobs
+
+
+def _current_user(session, request: Request) -> User | None:
+    user_id = request.session.get("user_id")
+    if not user_id:
+        return None
+    try:
+        return session.get(User, int(user_id))
+    except (TypeError, ValueError):
+        return None
+
+
+def _role_label(role: str | None) -> str:
+    return {
+        "viewer": "조회자",
+        "editor": "편집자",
+        "admin": "관리자",
+    }.get(str(role or "").strip(), "미지정")
+
+
+def _login_redirect(request: Request) -> RedirectResponse:
+    return RedirectResponse(url="/login", status_code=303)
+
+
+def _admin_redirect(*, notice: str | None = None, error: str | None = None) -> RedirectResponse:
+    params: dict[str, str] = {}
+    if notice:
+        params["notice"] = notice
+    if error:
+        params["error"] = error
+    suffix = f"?{urlencode(params)}" if params else ""
+    return RedirectResponse(url=f"/admin/operations{suffix}", status_code=303)
+
+
+def _ensure_html_role(session, request: Request, required_role: str = "viewer") -> User | RedirectResponse:
+    user = _current_user(session, request)
+    if user is None or not user.is_active:
+        return _login_redirect(request)
+    if not role_allows(user.role, required_role):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return user
+
+
+def _ensure_api_role(session, request: Request, required_role: str = "viewer") -> User:
+    user = _current_user(session, request)
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not role_allows(user.role, required_role):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return user
+
+
+def _ensure_admin_token_or_session(request: Request, x_admin_token: str | None = None) -> None:
+    if x_admin_token and x_admin_token == _settings(request).sync_admin_token:
+        return
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+    finally:
+        session.close()
 
 
 def _load_page_row(session, space_key: str, slug: str):
@@ -78,6 +144,36 @@ def _visible_spaces(session) -> list[Space]:
     ).all()
 
 
+def _sidebar_metrics(session) -> dict[str, int]:
+    spaces = _visible_spaces(session)
+    raw_page_count = int(session.scalar(select(func.count(Page.id))) or 0)
+    visible_kinds = {"keyword", "analysis", "query", "lint"}
+    knowledge_rows = session.scalars(
+        select(KnowledgeDocument.kind)
+        .join(Space, Space.id == KnowledgeDocument.space_id)
+        .where(Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY)
+    ).all()
+    knowledge_count = sum(1 for kind in knowledge_rows if normalize_knowledge_kind(kind) in visible_kinds)
+    return {
+        "raw_page_count": raw_page_count,
+        "knowledge_count": knowledge_count,
+        "source_space_count": len(spaces),
+    }
+
+
+def _with_sidebar_metrics(context: dict, session) -> dict:
+    enriched = dict(context)
+    enriched.setdefault("sidebar_metrics", _sidebar_metrics(session))
+    request = enriched.get("request")
+    if isinstance(request, Request):
+        current_user = _current_user(session, request)
+        enriched.setdefault("current_user", current_user)
+        enriched.setdefault("current_user_role_label", _role_label(current_user.role if current_user else None))
+        enriched.setdefault("can_edit", bool(current_user and role_allows(current_user.role, "editor")))
+        enriched.setdefault("can_admin", bool(current_user and role_allows(current_user.role, "admin")))
+    return enriched
+
+
 def _display_document_title(space_key: str | None, title: str | None) -> str:
     normalized = str(title or "").strip()
     prefix = f"{space_key} " if space_key else ""
@@ -105,14 +201,29 @@ def _history_snapshot_path(request: Request, space_key: str, slug: str, version_
     return _settings(request).wiki_root / "spaces" / space_key / "history" / slug / f"v{version_number:04d}.md"
 
 
-def _knowledge_prod_url(session, source_refs: str | None) -> str | None:
-    source_pages = _knowledge_source_pages(session, source_refs)
+def _knowledge_prod_url(session, settings, source_refs: str | None) -> str | None:
+    source_pages = _knowledge_source_pages(session, settings, source_refs)
     if len(source_pages) != 1:
         return None
     return source_pages[0]["prod_url"] or None
 
 
-def _knowledge_source_pages(session, source_refs: str | None) -> list[dict[str, str]]:
+def _normalize_source_text(text: str) -> str:
+    plain = BeautifulSoup(str(text or ""), "html.parser").get_text(" ", strip=True)
+    return " ".join(plain.split()).strip()
+
+
+def _source_tokens(text: str) -> Counter[str]:
+    return Counter(token.lower() for token in _SOURCE_TOKEN_RE.findall(_normalize_source_text(text)))
+
+
+def _format_source_date(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.strftime("%Y-%m-%d")
+
+
+def _knowledge_source_pages(session, settings, source_refs: str | None) -> list[dict[str, str]]:
     if not source_refs:
         return []
     raw_page_refs: list[tuple[str, str]] = []
@@ -124,18 +235,115 @@ def _knowledge_source_pages(session, source_refs: str | None) -> list[dict[str, 
     if not raw_page_refs:
         return []
     rows = session.execute(
-        select(Page.slug, Page.title, Page.prod_url, Space.space_key)
+        select(Page.slug, Page.title, Page.prod_url, Page.updated_at_remote, Space.space_key, WikiDocument.markdown_path, WikiDocument.summary)
         .join(Space, Space.id == Page.space_id)
+        .join(WikiDocument, WikiDocument.page_id == Page.id)
     ).all()
-    by_ref = {
-        (space_key_value, slug): {"slug": slug, "title": title, "prod_url": prod_url or "", "space_key": space_key_value}
-        for slug, title, prod_url, space_key_value in rows
-    }
-    return [by_ref[ref] for ref in raw_page_refs if ref in by_ref]
+    by_ref: dict[tuple[str, str], dict[str, object]] = {}
+    for slug, title, prod_url, updated_at_remote, space_key_value, markdown_path, summary in rows:
+        body_excerpt = ""
+        if markdown_path:
+            page_path = settings.wiki_root / str(markdown_path)
+            if page_path.exists():
+                body_excerpt = read_markdown_body(page_path)[:2500]
+        match_text = "\n".join(part for part in [title or "", summary or "", body_excerpt] if part)
+        by_ref[(space_key_value, slug)] = {
+            "slug": slug,
+            "title": title,
+            "prod_url": prod_url or "",
+            "space_key": space_key_value,
+            "updated_at_remote": updated_at_remote,
+            "updated_at_label": _format_source_date(updated_at_remote),
+            "match_text": match_text,
+            "match_tokens": _source_tokens(match_text),
+            "title_tokens": _source_tokens(title or ""),
+        }
+    ordered_sources: list[dict[str, object]] = []
+    for number, ref in enumerate((ref for ref in raw_page_refs if ref in by_ref), start=1):
+        ordered_sources.append({**by_ref[ref], "number": number, "anchor_id": f"source-evidence-{number}"})
+    return ordered_sources
+
+
+def _best_matching_source_numbers(text: str, source_links: list[dict[str, object]]) -> list[int]:
+    if not source_links:
+        return []
+    normalized_text = _normalize_source_text(text)
+    if len(normalized_text) < 10:
+        return []
+    if len(source_links) == 1:
+        return [int(source_links[0]["number"])]
+    query_tokens = _source_tokens(normalized_text)
+    if not query_tokens:
+        return []
+    ranked: list[tuple[int, int]] = []
+    lowered_text = normalized_text.lower()
+    for source in source_links:
+        score = 0
+        source_token_counts = source.get("match_tokens") or Counter()
+        title_tokens = source.get("title_tokens") or Counter()
+        score += sum(min(query_tokens[token], source_token_counts.get(token, 0)) for token in query_tokens)
+        title = str(source.get("title") or "").lower()
+        if title and title in lowered_text:
+            score += 6
+        score += sum(min(query_tokens[token], title_tokens.get(token, 0)) for token in query_tokens) * 2
+        if score > 0:
+            ranked.append((score, int(source["number"])))
+    ranked.sort(reverse=True)
+    return [ranked[0][1]] if ranked else []
+
+
+def _annotate_knowledge_body_html(body_html: str, source_links: list[dict[str, object]]) -> str:
+    if not body_html or not source_links:
+        return body_html
+    soup = BeautifulSoup(body_html, "html.parser")
+    numbered_sources = {int(source["number"]): source for source in source_links}
+    for element in soup.select("li, p"):
+        if element.find("sub", class_="inline-source-citation"):
+            continue
+        if element.name == "p" and element.parent and element.parent.name == "li":
+            continue
+        if any(parent.name in {"blockquote", "table", "thead", "tbody", "tr", "td", "th"} for parent in element.parents):
+            continue
+        matches = _best_matching_source_numbers(element.get_text(" ", strip=True), source_links)
+        if not matches:
+            continue
+        citation = soup.new_tag("sub", attrs={"class": "inline-source-citation"})
+        for index, number in enumerate(matches):
+            source = numbered_sources[number]
+            link = soup.new_tag(
+                "a",
+                attrs={
+                    "class": "inline-source-link",
+                    "href": str(source.get("prod_url") or f"#{source.get('anchor_id')}"),
+                    "target": "_blank",
+                    "rel": "noreferrer",
+                },
+            )
+            link.string = f"[{number}]"
+            citation.append(link)
+            if index < len(matches) - 1:
+                citation.append(" ")
+        updated_at_label = str(numbered_sources[matches[0]].get("updated_at_label") or "").strip()
+        if updated_at_label:
+            citation.append(" ")
+            date_span = soup.new_tag("span", attrs={"class": "inline-source-date"})
+            date_span.string = updated_at_label
+            citation.append(date_span)
+        element.append(" ")
+        element.append(citation)
+    return str(soup)
 
 
 def _document_source_space_keys(doc: KnowledgeDocument) -> list[str]:
     return source_space_keys(doc.source_refs)
+
+
+def _source_page_count_for_doc(doc: KnowledgeDocument) -> int:
+    refs = {
+        (match.group("space_key") or "", match.group("slug") or "")
+        for match in _RAW_PAGE_REF_RE.finditer(doc.source_refs or "")
+    }
+    return len({ref for ref in refs if ref[0] and ref[1]})
 
 
 def _space_filter_matches(doc: KnowledgeDocument, selected_space: str | None) -> bool:
@@ -268,6 +476,290 @@ def _load_graph_payload(request: Request, selected_space: str | None = None, vie
         session.close()
 
 
+@router.get("/login", response_class=HTMLResponse)
+async def login_form(request: Request, next: str | None = Query(default=None), error: str | None = Query(default=None)) -> HTMLResponse:
+    session = _session_factory(request)()
+    try:
+        current_user = _current_user(session, request)
+        if current_user is not None and current_user.is_active:
+            return RedirectResponse(url=next or "/", status_code=303)
+        return _templates(request).TemplateResponse(
+            request,
+            "login.html",
+            _with_sidebar_metrics(
+                {
+                    "request": request,
+                    "selected_space": "all",
+                    "selected_space_name": "로그인",
+                    "login_next": next or "/",
+                    "login_error": error or "",
+                    "meta_description": _meta_description("Confluence Wiki 로그인"),
+                },
+                session,
+            ),
+        )
+    finally:
+        session.close()
+
+
+@router.post("/auth/login")
+async def login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    next: str = Form(default="/"),
+) -> RedirectResponse:
+    session = _session_factory(request)()
+    try:
+        user = authenticate_user(session, username=username, password=password)
+        if user is None:
+            destination = f"/login?error={quote('아이디 또는 비밀번호가 올바르지 않습니다.')}"
+            if next:
+                destination += f"&next={quote(next, safe='/%?=&')}"
+            return RedirectResponse(url=destination, status_code=303)
+        request.session["user_id"] = user.id
+        return RedirectResponse(url=next or "/", status_code=303)
+    finally:
+        session.close()
+
+
+@router.post("/auth/logout")
+async def logout_submit(request: Request) -> RedirectResponse:
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=303)
+
+
+@router.get("/admin/users", response_class=HTMLResponse)
+async def admin_users(request: Request) -> HTMLResponse:
+    session = _session_factory(request)()
+    try:
+        auth_result = _ensure_html_role(session, request, "admin")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
+        users = session.scalars(select(User).order_by(User.username.asc())).all()
+        return _templates(request).TemplateResponse(
+            request,
+            "admin_users.html",
+            _with_sidebar_metrics(
+                {
+                    "request": request,
+                    "selected_space": "all",
+                    "selected_space_name": "관리",
+                    "users": users,
+                    "page_title": "사용자 관리",
+                    "meta_description": _meta_description("Confluence Wiki 사용자 관리"),
+                },
+                session,
+            ),
+        )
+    finally:
+        session.close()
+
+
+@router.post("/admin/users")
+async def admin_create_user(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    role: str = Form(...),
+) -> RedirectResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+        create_user(session, username=username, password=password, role=role)
+        session.commit()
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        session.close()
+    return RedirectResponse(url="/admin/users", status_code=303)
+
+
+@router.post("/admin/users/{user_id}/role")
+async def admin_update_user_role(
+    request: Request,
+    user_id: int,
+    role: str = Form(...),
+) -> RedirectResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+        user = session.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        normalized_role = str(role or "").strip().lower()
+        if normalized_role not in {"viewer", "editor", "admin"}:
+            raise HTTPException(status_code=400, detail="Invalid role")
+        user.role = normalized_role
+        session.commit()
+    finally:
+        session.close()
+    return RedirectResponse(url="/admin/users", status_code=303)
+
+
+@router.get("/admin/operations", response_class=HTMLResponse)
+async def admin_operations(
+    request: Request,
+    notice: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+) -> HTMLResponse:
+    session = _session_factory(request)()
+    try:
+        auth_result = _ensure_html_role(session, request, "admin")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
+        schedule_service = ScheduleService(_settings(request))
+        operation_rows = schedule_service.operations_rows(session)
+        summary = {
+            "space_count": len(operation_rows),
+            "enabled_space_count": sum(1 for row in operation_rows if row["enabled"]),
+            "enabled_schedule_count": sum(1 for row in operation_rows if row["schedule"]["enabled"]),
+            "due_schedule_count": sum(1 for row in operation_rows if row["schedule"]["due"]),
+            "app_timezone": _settings(request).app_timezone,
+        }
+        return _templates(request).TemplateResponse(
+            request,
+            "admin_operations.html",
+            _with_sidebar_metrics(
+                {
+                    "request": request,
+                    "selected_space": "all",
+                    "selected_space_name": "운영 관리",
+                    "page_title": "운영 관리",
+                    "meta_description": _meta_description("Confluence bootstrap과 증분 동기화 스케줄 관리"),
+                    "operation_rows": operation_rows,
+                    "operations_summary": summary,
+                    "notice": notice or "",
+                    "error": error or "",
+                },
+                session,
+            ),
+        )
+    finally:
+        session.close()
+
+
+@router.post("/admin/spaces")
+async def admin_upsert_space(
+    request: Request,
+    space_key: str = Form(...),
+    name: str = Form(default=""),
+    root_page_id: str = Form(default=""),
+    enabled: str | None = Form(default=None),
+) -> RedirectResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+        normalized_key = str(space_key or "").strip()
+        if not normalized_key:
+            raise ValueError("space_key is required")
+        upsert_space(
+            session,
+            space_key=normalized_key,
+            name=str(name or "").strip() or normalized_key,
+            root_page_id=str(root_page_id or "").strip() or None,
+        ).enabled = bool(enabled)
+        session.commit()
+    except ValueError as exc:
+        session.rollback()
+        return _admin_redirect(error=str(exc))
+    finally:
+        session.close()
+    return _admin_redirect(notice=f"{space_key} 공간 설정을 저장했습니다.")
+
+
+@router.post("/admin/spaces/{space_key}/schedule")
+async def admin_save_space_schedule(
+    request: Request,
+    space_key: str,
+    enabled: str | None = Form(default=None),
+    run_time: str = Form(...),
+    timezone: str = Form(default=""),
+) -> RedirectResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+        space = session.scalar(select(Space).where(Space.space_key == space_key))
+        if space is None:
+            raise ValueError("space not found")
+        ScheduleService(_settings(request)).upsert_incremental_schedule(
+            session,
+            space=space,
+            enabled=bool(enabled),
+            run_time=run_time,
+            timezone_name=timezone,
+        )
+        session.commit()
+    except ValueError as exc:
+        session.rollback()
+        return _admin_redirect(error=str(exc))
+    finally:
+        session.close()
+    return _admin_redirect(notice=f"{space_key} 증분 스케줄을 저장했습니다.")
+
+
+@router.post("/admin/spaces/{space_key}/bootstrap")
+async def admin_run_space_bootstrap(
+    request: Request,
+    space_key: str,
+) -> RedirectResponse:
+    root_page_id = ""
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+        space = session.scalar(select(Space).where(Space.space_key == space_key))
+        if space is None or not space.root_page_id:
+            raise ValueError("bootstrap root page id is required")
+        root_page_id = space.root_page_id
+    except ValueError as exc:
+        return _admin_redirect(error=str(exc))
+    finally:
+        session.close()
+    try:
+        await SyncService(settings=_settings(request)).run_bootstrap_async(space_key=space_key, root_page_id=root_page_id)
+    except Exception as exc:  # noqa: BLE001
+        return _admin_redirect(error=f"{space_key} bootstrap 실패: {exc}")
+    return _admin_redirect(notice=f"{space_key} bootstrap을 실행했습니다.")
+
+
+@router.post("/admin/spaces/{space_key}/sync")
+async def admin_run_space_incremental(
+    request: Request,
+    space_key: str,
+) -> RedirectResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+        space = session.scalar(select(Space).where(Space.space_key == space_key))
+        if space is None:
+            raise ValueError("space not found")
+    except ValueError as exc:
+        return _admin_redirect(error=str(exc))
+    finally:
+        session.close()
+    try:
+        await SyncService(settings=_settings(request)).run_incremental_async(space_key=space_key)
+    except Exception as exc:  # noqa: BLE001
+        return _admin_redirect(error=f"{space_key} 증분 동기화 실패: {exc}")
+    return _admin_redirect(notice=f"{space_key} 증분 동기화를 실행했습니다.")
+
+
+@router.post("/admin/schedules/run-due-now")
+async def admin_run_due_schedules_now(request: Request) -> RedirectResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+        results = await ScheduleService(_settings(request)).run_due_incremental_schedules(session)
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        session.rollback()
+        return _admin_redirect(error=f"도래한 스케줄 실행 실패: {exc}")
+    finally:
+        session.close()
+    return _admin_redirect(notice=f"도래한 스케줄 {len(results)}건을 실행했습니다.")
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(
     request: Request,
@@ -277,6 +769,9 @@ async def index(
 ) -> HTMLResponse:
     session = _session_factory(request)()
     try:
+        auth_result = _ensure_html_role(session, request, "viewer")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
         spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
         knowledge_query = (
@@ -296,10 +791,53 @@ async def index(
         ]
         pages.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
         pages = pages[:20]
+        show_home_rail = (space or "all") == "all"
+        featured_topics = []
+        recent_sources = []
+        if show_home_rail:
+            featured_docs = [
+                doc
+                for doc, _doc_space in knowledge_rows
+                if _is_user_visible_knowledge(doc) and normalize_knowledge_kind(doc.kind) in {"keyword", "query"}
+            ]
+            featured_docs.sort(
+                key=lambda doc: (
+                    _source_page_count_for_doc(doc),
+                    1 if normalize_knowledge_kind(doc.kind) == "query" else 0,
+                    doc.updated_at.isoformat(),
+                    (doc.title or "").lower(),
+                ),
+                reverse=True,
+            )
+            featured_topics = [
+                {
+                    "title": _display_document_title(None, doc.title),
+                    "href": knowledge_href(doc.kind, doc.slug),
+                    "kind_label": knowledge_label(doc.kind),
+                    "source_count": _source_page_count_for_doc(doc),
+                    "source_space_names": _space_names_for_doc(doc, space_name_by_key),
+                }
+                for doc in featured_docs[:4]
+            ]
+            raw_rows = session.execute(
+                select(Page, Space)
+                .join(Space, Space.id == Page.space_id)
+                .order_by(Page.updated_at_remote.desc(), Page.id.desc())
+                .limit(5)
+            ).all()
+            recent_sources = [
+                {
+                    "title": page.title,
+                    "href": f"/spaces/{space_obj.space_key}/pages/{page.slug}",
+                    "space_name": _space_display_name(space_obj),
+                    "updated_at_label": _format_source_date(page.updated_at_remote),
+                }
+                for page, space_obj in raw_rows
+            ]
         return _templates(request).TemplateResponse(
             request,
             "index.html",
-            {
+            _with_sidebar_metrics({
                 "request": request,
                 "spaces": spaces,
                 "space_name_by_key": space_name_by_key,
@@ -310,10 +848,13 @@ async def index(
                 "selected_recent": recent or "all",
                 "synthesis_href": f"/spaces/{space}/synthesis" if space and space != "all" else None,
                 "filter_action": request.url.path,
+                "show_home_rail": show_home_rail,
+                "featured_topics": featured_topics,
+                "recent_sources": recent_sources,
                 "meta_description": _meta_description(
                     f"{(space or '전체')} space 문서 홈입니다. 최근 문서 {len(pages)}건을 표시합니다."
                 ),
-            },
+            }, session),
         )
     finally:
         session.close()
@@ -333,6 +874,10 @@ async def space_index(
 async def knowledge_view(request: Request, kind: str, slug: str, space: str | None = Query(default=None)) -> HTMLResponse:
     session = _session_factory(request)()
     try:
+        auth_result = _ensure_html_role(session, request, "viewer")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
+        settings = _settings(request)
         normalized_kind = normalize_knowledge_kind(kind)
         doc = session.scalar(
             select(KnowledgeDocument)
@@ -348,24 +893,24 @@ async def knowledge_view(request: Request, kind: str, slug: str, space: str | No
             )
         if doc is None:
             raise HTTPException(status_code=404, detail="Knowledge page not found")
-        markdown_path = _settings(request).wiki_root / doc.markdown_path
-        body_html = render_markdown(read_markdown_body(markdown_path))
+        markdown_path = settings.wiki_root / doc.markdown_path
+        source_links = _knowledge_source_pages(session, settings, doc.source_refs)
+        body_html = _annotate_knowledge_body_html(render_markdown(read_markdown_body(markdown_path)), source_links)
         spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
         display_title = _display_document_title(None, doc.title)
         doc_space_names = _space_names_for_doc(doc, space_name_by_key)
         page_obj = SimpleNamespace(
             title=display_title,
-            prod_url=_knowledge_prod_url(session, doc.source_refs),
+            prod_url=_knowledge_prod_url(session, settings, doc.source_refs),
             updated_at_remote=doc.updated_at,
             current_version=None,
             slug=doc.slug,
         )
-        source_links = _knowledge_source_pages(session, doc.source_refs)
         return _templates(request).TemplateResponse(
             request,
             "page.html",
-            {
+            _with_sidebar_metrics({
                 "request": request,
                 "spaces": spaces,
                 "space_name_by_key": space_name_by_key,
@@ -382,13 +927,26 @@ async def knowledge_view(request: Request, kind: str, slug: str, space: str | No
                 "history_href": None,
                 "history_notice": None,
                 "current_page_href": None,
-                "edit_href": f"/knowledge/{knowledge_segment(normalized_kind)}/{slug}/edit" if _is_editable_knowledge_kind(normalized_kind) else None,
-                "regenerate_href": f"/knowledge/{knowledge_segment(normalized_kind)}/{quote(slug)}/regenerate" if _is_regenerable_knowledge_kind(normalized_kind) else None,
-                "regenerate_label": _knowledge_regenerate_label(normalized_kind) if _is_regenerable_knowledge_kind(normalized_kind) else None,
+                "edit_href": (
+                    f"/knowledge/{knowledge_segment(normalized_kind)}/{slug}/edit"
+                    if role_allows(auth_result.role, "editor") and _is_editable_knowledge_kind(normalized_kind)
+                    else None
+                ),
+                "regenerate_href": (
+                    f"/knowledge/{knowledge_segment(normalized_kind)}/{quote(slug)}/regenerate"
+                    if role_allows(auth_result.role, "editor") and _is_regenerable_knowledge_kind(normalized_kind)
+                    else None
+                ),
+                "regenerate_label": (
+                    _knowledge_regenerate_label(normalized_kind)
+                    if role_allows(auth_result.role, "editor") and _is_regenerable_knowledge_kind(normalized_kind)
+                    else None
+                ),
                 "regenerate_selected_space": "" if (space or "all") == "all" else (space or ""),
+                "regenerate_kind": normalized_kind,
                 "source_links": source_links,
                 "meta_description": _meta_description(doc.summary or display_title),
-            },
+            }, session),
         )
     finally:
         session.close()
@@ -403,6 +961,9 @@ async def knowledge_view_legacy(space_key: str, kind: str, slug: str) -> Redirec
 async def synthesis_view(request: Request, space_key: str) -> HTMLResponse:
     session = _session_factory(request)()
     try:
+        auth_result = _ensure_html_role(session, request, "viewer")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
         synthesis_path = _settings(request).wiki_root / "spaces" / space_key / "synthesis.md"
         if not synthesis_path.exists():
             raise HTTPException(status_code=404, detail="Synthesis not found")
@@ -412,7 +973,7 @@ async def synthesis_view(request: Request, space_key: str) -> HTMLResponse:
         return _templates(request).TemplateResponse(
             request,
             "page.html",
-            {
+            _with_sidebar_metrics({
                 "request": request,
                 "spaces": spaces,
                 "space_name_by_key": space_name_by_key,
@@ -428,8 +989,8 @@ async def synthesis_view(request: Request, space_key: str) -> HTMLResponse:
                 "history_href": None,
                 "history_notice": None,
                 "current_page_href": None,
-                "edit_href": f"/spaces/{space_key}/synthesis/edit",
-            },
+                "edit_href": f"/spaces/{space_key}/synthesis/edit" if role_allows(auth_result.role, "editor") else None,
+            }, session),
         )
     finally:
         session.close()
@@ -439,6 +1000,9 @@ async def synthesis_view(request: Request, space_key: str) -> HTMLResponse:
 async def page_history(request: Request, space_key: str, slug: str) -> HTMLResponse:
     session = _session_factory(request)()
     try:
+        auth_result = _ensure_html_role(session, request, "viewer")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
         row = _load_page_row(session, space_key, slug)
         if row is None:
             raise HTTPException(status_code=404, detail="Page not found")
@@ -451,7 +1015,7 @@ async def page_history(request: Request, space_key: str, slug: str) -> HTMLRespo
         return _templates(request).TemplateResponse(
             request,
             "page_history.html",
-            {
+            _with_sidebar_metrics({
                 "request": request,
                 "spaces": spaces,
                 "space_name_by_key": space_name_by_key,
@@ -462,7 +1026,7 @@ async def page_history(request: Request, space_key: str, slug: str) -> HTMLRespo
                 "page_space_name": space_name_by_key.get(space_key, space_key),
                 "versions": versions,
                 "meta_description": _meta_description(wiki_document.summary or page.title),
-            },
+            }, session),
         )
     finally:
         session.close()
@@ -472,6 +1036,9 @@ async def page_history(request: Request, space_key: str, slug: str) -> HTMLRespo
 async def page_history_version(request: Request, space_key: str, slug: str, version_number: int) -> HTMLResponse:
     session = _session_factory(request)()
     try:
+        auth_result = _ensure_html_role(session, request, "viewer")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
         row = _load_page_row(session, space_key, slug)
         if row is None:
             raise HTTPException(status_code=404, detail="Page not found")
@@ -511,7 +1078,7 @@ async def page_history_version(request: Request, space_key: str, slug: str, vers
         return _templates(request).TemplateResponse(
             request,
             "page.html",
-            {
+            _with_sidebar_metrics({
                 "request": request,
                 "spaces": spaces,
                 "space_name_by_key": space_name_by_key,
@@ -528,7 +1095,7 @@ async def page_history_version(request: Request, space_key: str, slug: str, vers
                 "current_page_href": f"/spaces/{space_key}/pages/{slug}",
                 "edit_href": None,
                 "meta_description": _meta_description(version.summary or page.title),
-            },
+            }, session),
         )
     finally:
         session.close()
@@ -538,6 +1105,9 @@ async def page_history_version(request: Request, space_key: str, slug: str, vers
 async def page_view(request: Request, space_key: str, slug: str) -> HTMLResponse:
     session = _session_factory(request)()
     try:
+        auth_result = _ensure_html_role(session, request, "viewer")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
         row = _load_page_row(session, space_key, slug)
         if row is None:
             raise HTTPException(status_code=404, detail="Page not found")
@@ -552,7 +1122,7 @@ async def page_view(request: Request, space_key: str, slug: str) -> HTMLResponse
         return _templates(request).TemplateResponse(
             request,
             "page.html",
-            {
+            _with_sidebar_metrics({
                 "request": request,
                 "spaces": spaces,
                 "space_name_by_key": space_name_by_key,
@@ -569,7 +1139,7 @@ async def page_view(request: Request, space_key: str, slug: str) -> HTMLResponse
                 "current_page_href": None,
                 "edit_href": None,
                 "meta_description": _meta_description(wiki_document.summary or page.title),
-            },
+            }, session),
         )
     finally:
         session.close()
@@ -585,6 +1155,9 @@ async def search(
 ) -> HTMLResponse:
     session = _session_factory(request)()
     try:
+        auth_result = _ensure_html_role(session, request, "viewer")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
         spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
         results = []
@@ -615,7 +1188,7 @@ async def search(
         return _templates(request).TemplateResponse(
             request,
             "index.html",
-            {
+            _with_sidebar_metrics({
                 "request": request,
                 "spaces": spaces,
                 "space_name_by_key": space_name_by_key,
@@ -630,7 +1203,7 @@ async def search(
                 "meta_description": _meta_description(
                     f"검색어 {q} 에 대한 결과 {len(results)}건입니다. 범위는 {(space or '전체 위키')} 입니다."
                 ),
-            },
+            }, session),
         )
     finally:
         session.close()
@@ -640,12 +1213,15 @@ async def search(
 async def graph_page(request: Request, space: str | None = None, view: str = Query(default="knowledge")) -> HTMLResponse:
     session = _session_factory(request)()
     try:
+        auth_result = _ensure_html_role(session, request, "viewer")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
         spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
         return _templates(request).TemplateResponse(
             request,
             "graph.html",
-            {
+            _with_sidebar_metrics({
                 "request": request,
                 "spaces": spaces,
                 "space_name_by_key": space_name_by_key,
@@ -655,7 +1231,7 @@ async def graph_page(request: Request, space: str | None = None, view: str = Que
                 "meta_description": _meta_description(
                     f"{(space or '전체')} 범위 문서 연결 그래프를 표시합니다."
                 ),
-            },
+            }, session),
         )
     finally:
         session.close()
@@ -665,6 +1241,7 @@ async def graph_page(request: Request, space: str | None = None, view: str = Que
 async def api_spaces(request: Request) -> list[dict[str, str]]:
     session = _session_factory(request)()
     try:
+        _ensure_api_role(session, request, "viewer")
         spaces = _visible_spaces(session)
         return [{"space_key": space.space_key, "name": space.name or space.space_key} for space in spaces]
     finally:
@@ -675,6 +1252,7 @@ async def api_spaces(request: Request) -> list[dict[str, str]]:
 async def api_search(request: Request, q: str = Query(default=""), space: str | None = None) -> list[dict[str, str]]:
     session = _session_factory(request)()
     try:
+        _ensure_api_role(session, request, "viewer")
         if not q:
             return []
         knowledge_query = (
@@ -709,6 +1287,9 @@ async def api_search(request: Request, q: str = Query(default=""), space: str | 
 async def knowledge_edit_form(request: Request, kind: str, slug: str, space: str | None = Query(default=None)) -> HTMLResponse:
     session = _session_factory(request)()
     try:
+        auth_result = _ensure_html_role(session, request, "editor")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
         normalized_kind = normalize_knowledge_kind(kind)
         if not _is_editable_knowledge_kind(normalized_kind):
             raise HTTPException(status_code=404, detail="Knowledge page not editable")
@@ -734,7 +1315,7 @@ async def knowledge_edit_form(request: Request, kind: str, slug: str, space: str
         return _templates(request).TemplateResponse(
             request,
             "page_edit.html",
-            {
+            _with_sidebar_metrics({
                 "request": request,
                 "spaces": spaces,
                 "space_name_by_key": space_name_by_key,
@@ -747,7 +1328,7 @@ async def knowledge_edit_form(request: Request, kind: str, slug: str, space: str
                 "cancel_href": knowledge_href(normalized_kind, slug),
                 "edit_notice": _edit_notice(normalized_kind),
                 "meta_description": _meta_description(f"{display_title} 편집"),
-            },
+            }, session),
         )
     finally:
         session.close()
@@ -761,10 +1342,14 @@ async def knowledge_edit_save(
     body: str = Form(...),
     selected_space: str = Form(default=""),
 ) -> RedirectResponse:
+    session = _session_factory(request)()
     try:
+        _ensure_api_role(session, request, "editor")
         result = KnowledgeService(_settings(request)).update_document_body(space_key=selected_space or "GLOBAL", kind=kind, slug=slug, body=body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        session.close()
     return RedirectResponse(url=result["href"], status_code=303)
 
 
@@ -775,7 +1360,9 @@ async def knowledge_regenerate(
     slug: str,
     selected_space: str = Form(default=""),
 ) -> RedirectResponse:
+    session = _session_factory(request)()
     try:
+        _ensure_api_role(session, request, "editor")
         result = KnowledgeService(_settings(request)).regenerate_document(
             kind=kind,
             slug=slug,
@@ -783,6 +1370,8 @@ async def knowledge_regenerate(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        session.close()
     return RedirectResponse(url=result["href"], status_code=303)
 
 
@@ -799,10 +1388,14 @@ async def knowledge_edit_save_legacy(
     slug: str,
     body: str = Form(...),
 ) -> RedirectResponse:
+    session = _session_factory(request)()
     try:
+        _ensure_api_role(session, request, "editor")
         result = KnowledgeService(_settings(request)).update_document_body(space_key=space_key, kind=kind, slug=slug, body=body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        session.close()
     return RedirectResponse(url=result["href"], status_code=303)
 
 
@@ -813,7 +1406,9 @@ async def knowledge_regenerate_legacy(
     kind: str,
     slug: str,
 ) -> RedirectResponse:
+    session = _session_factory(request)()
     try:
+        _ensure_api_role(session, request, "editor")
         result = KnowledgeService(_settings(request)).regenerate_document(
             kind=kind,
             slug=slug,
@@ -821,6 +1416,8 @@ async def knowledge_regenerate_legacy(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        session.close()
     return RedirectResponse(url=result["href"], status_code=303)
 
 
@@ -828,6 +1425,9 @@ async def knowledge_regenerate_legacy(
 async def synthesis_edit_form(request: Request, space_key: str) -> HTMLResponse:
     session = _session_factory(request)()
     try:
+        auth_result = _ensure_html_role(session, request, "editor")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
         synthesis_path = _settings(request).wiki_root / "spaces" / space_key / "synthesis.md"
         if not synthesis_path.exists():
             raise HTTPException(status_code=404, detail="Synthesis not found")
@@ -837,7 +1437,7 @@ async def synthesis_edit_form(request: Request, space_key: str) -> HTMLResponse:
         return _templates(request).TemplateResponse(
             request,
             "page_edit.html",
-            {
+            _with_sidebar_metrics({
                 "request": request,
                 "spaces": spaces,
                 "space_name_by_key": space_name_by_key,
@@ -850,7 +1450,7 @@ async def synthesis_edit_form(request: Request, space_key: str) -> HTMLResponse:
                 "cancel_href": f"/spaces/{space_key}/synthesis",
                 "edit_notice": _edit_notice("synthesis"),
                 "meta_description": _meta_description("Synthesis 편집"),
-            },
+            }, session),
         )
     finally:
         session.close()
@@ -862,6 +1462,11 @@ async def synthesis_edit_save(
     space_key: str,
     body: str = Form(...),
 ) -> RedirectResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "editor")
+    finally:
+        session.close()
     content = body.strip()
     if not content:
         raise HTTPException(status_code=400, detail="body is required")
@@ -878,6 +1483,11 @@ async def synthesis_edit_save(
 
 @router.get("/api/graph")
 async def api_graph(request: Request, space: str | None = None, view: str = Query(default="raw")) -> dict:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "viewer")
+    finally:
+        session.close()
     normalized_view = view if view in {"knowledge", "raw"} else "raw"
     return _load_graph_payload(request, None if space in {None, "", "all"} else space, normalized_view)
 
@@ -886,6 +1496,7 @@ async def api_graph(request: Request, space: str | None = None, view: str = Quer
 async def api_page(request: Request, space_key: str, slug: str) -> dict:
     session = _session_factory(request)()
     try:
+        _ensure_api_role(session, request, "viewer")
         statement = (
             select(Page, WikiDocument)
             .join(Space, Space.id == Page.space_id)
@@ -909,6 +1520,11 @@ async def api_page(request: Request, space_key: str, slug: str) -> dict:
 
 @router.post("/api/ask")
 async def api_ask(request: Request, payload: dict) -> dict:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "viewer")
+    finally:
+        session.close()
     question = str(payload.get("question") or "").strip()
     scope = str(payload.get("scope") or "space").strip()
     selected_space = payload.get("selected_space")
@@ -921,6 +1537,11 @@ async def api_ask(request: Request, payload: dict) -> dict:
 
 @router.post("/api/ask/save")
 async def api_ask_save(request: Request, payload: dict) -> dict:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "editor")
+    finally:
+        session.close()
     service = WikiQAService(settings=_settings(request))
     try:
         return service.save_answer(
@@ -941,6 +1562,11 @@ async def generate_query_wiki(
     query: str | None = Form(default=None),
     space: str = Form(default=""),
 ) -> RedirectResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "editor")
+    finally:
+        session.close()
     submitted_query = str(q or query or request.query_params.get("q") or request.query_params.get("query") or "").strip()
     if not submitted_query:
         return RedirectResponse(url=request.headers.get("referer") or "/", status_code=303)
@@ -956,6 +1582,11 @@ async def generate_query_wiki(
 
 @router.post("/api/wiki-from-query")
 async def api_generate_query_wiki(request: Request, payload: dict) -> dict:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "editor")
+    finally:
+        session.close()
     try:
         return KnowledgeService(_settings(request)).save_query_wiki(
             query=str(payload.get("query") or ""),
@@ -967,6 +1598,11 @@ async def api_generate_query_wiki(request: Request, payload: dict) -> dict:
 
 @router.post("/api/query-jobs")
 async def api_start_query_job(request: Request, payload: dict) -> JSONResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "editor")
+    finally:
+        session.close()
     query = str(payload.get("query") or payload.get("q") or "").strip()
     selected_space = str(payload.get("selected_space") or payload.get("space") or "").strip() or None
     try:
@@ -976,8 +1612,46 @@ async def api_start_query_job(request: Request, payload: dict) -> JSONResponse:
     return JSONResponse(snapshot, status_code=202)
 
 
+@router.post("/api/query-jobs/knowledge")
+async def api_start_regenerate_job(request: Request, payload: dict) -> JSONResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "editor")
+    finally:
+        session.close()
+    kind = str(payload.get("kind") or "").strip()
+    slug = str(payload.get("slug") or "").strip()
+    title = str(payload.get("title") or "").strip() or None
+    selected_space = str(payload.get("selected_space") or payload.get("space") or "").strip() or None
+    try:
+        snapshot = _query_jobs(request).start_regenerate_job(
+            kind=kind,
+            slug=slug,
+            title=title,
+            selected_space=selected_space,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(snapshot, status_code=202)
+
+
+@router.get("/api/query-jobs")
+async def api_query_job_queue(request: Request) -> dict:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "viewer")
+    finally:
+        session.close()
+    return _query_jobs(request).list_jobs()
+
+
 @router.get("/api/query-jobs/{job_id}")
 async def api_query_job_status(request: Request, job_id: str) -> dict:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "viewer")
+    finally:
+        session.close()
     snapshot = _query_jobs(request).get_job(job_id)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="query job not found")
@@ -990,8 +1664,7 @@ async def admin_bootstrap(
     payload: dict,
     x_admin_token: str | None = Header(default=None),
 ) -> JSONResponse:
-    if x_admin_token != _settings(request).sync_admin_token:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
+    _ensure_admin_token_or_session(request, x_admin_token)
     service = SyncService(settings=_settings(request))
     result = await service.run_bootstrap_async(space_key=payload["space"], root_page_id=payload["page_id"])
     return JSONResponse({"mode": result.mode, "processed_pages": result.processed_pages})
@@ -1003,8 +1676,46 @@ async def admin_sync(
     payload: dict,
     x_admin_token: str | None = Header(default=None),
 ) -> JSONResponse:
-    if x_admin_token != _settings(request).sync_admin_token:
-        raise HTTPException(status_code=401, detail="Invalid admin token")
+    _ensure_admin_token_or_session(request, x_admin_token)
     service = SyncService(settings=_settings(request))
     result = await service.run_incremental_async(space_key=payload["space"])
     return JSONResponse({"mode": result.mode, "processed_pages": result.processed_pages})
+
+
+@router.post("/admin/schedules/run-due")
+async def admin_run_due_schedules(
+    request: Request,
+    payload: dict | None = None,
+    x_admin_token: str | None = Header(default=None),
+) -> JSONResponse:
+    _ensure_admin_token_or_session(request, x_admin_token)
+    now_value: datetime | None = None
+    if payload and payload.get("now"):
+        try:
+            now_value = datetime.fromisoformat(str(payload["now"]))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid now timestamp") from exc
+    session = _session_factory(request)()
+    try:
+        results = await ScheduleService(_settings(request)).run_due_incremental_schedules(session, now=now_value)
+        session.commit()
+        return JSONResponse(
+            {
+                "executed_count": len(results),
+                "results": [
+                    {
+                        "space_key": item.space_key,
+                        "schedule_id": item.schedule_id,
+                        "status": item.status,
+                        "processed_pages": item.processed_pages,
+                        "error": item.error,
+                    }
+                    for item in results
+                ],
+            }
+        )
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()

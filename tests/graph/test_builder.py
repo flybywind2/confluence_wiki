@@ -125,3 +125,33 @@ def test_knowledge_graph_excludes_synthesis_nodes_and_edges():
 
     assert all(node["kind"] != "synthesis" for node in payload["nodes"])
     assert all(edge["type"] != "synthesis-keyword" for edge in payload["edges"])
+
+
+def test_knowledge_graph_uses_distinct_colors_for_keyword_and_page_nodes():
+    payload = build_knowledge_graph_payload(
+        knowledge_documents=[
+            {
+                "title": "원문에서 정리한 키워드",
+                "slug": "top-keyword",
+                "space_key": "global",
+                "kind": "keyword",
+                "summary": "",
+                "href": "/knowledge/keywords/top-keyword",
+                "source_refs": "[[spaces/DEMO/pages/demo-home-9001]]",
+                "source_spaces": ["DEMO"],
+            },
+        ],
+        page_documents=[
+            {
+                "title": "원문 문서",
+                "slug": "demo-home-9001",
+                "space_key": "DEMO",
+                "summary": "",
+                "href": "/spaces/DEMO/pages/demo-home-9001",
+            }
+        ],
+    )
+
+    by_kind = {node["kind"]: node for node in payload["nodes"]}
+    assert by_kind["keyword"]["color"] == "#0f766e"
+    assert by_kind["page"]["color"] == "#64748b"

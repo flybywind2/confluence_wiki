@@ -29,6 +29,7 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 - 우측 하단 플로팅 버튼 기반 Wiki Q&A 모달
 - assistant 답변을 분석 문서로 저장하고 재검색 근거로 재사용
 - 외부 스케줄러용 CLI / 관리자 API
+- 세션 로그인 기반 `조회자 / 편집자 / 관리자` 권한 분리
 
 ## LLM Wiki 구조
 
@@ -65,6 +66,10 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 - `CONF_PASSWORD`
 - `CONF_VERIFY_SSL=false`
 - `SYNC_RATE_LIMIT_PER_MINUTE=10`
+- `AUTH_SECRET_KEY`
+- `AUTH_BOOTSTRAP_ADMIN_USERNAME`, `AUTH_BOOTSTRAP_ADMIN_PASSWORD`
+- `AUTH_BOOTSTRAP_EDITOR_USERNAME`, `AUTH_BOOTSTRAP_EDITOR_PASSWORD`
+- `AUTH_BOOTSTRAP_VIEWER_USERNAME`, `AUTH_BOOTSTRAP_VIEWER_PASSWORD`
 - `DATABASE_URL`
 - `WIKI_ROOT`
 - `CACHE_ROOT`
@@ -101,9 +106,31 @@ py -3.10 -m uvicorn app.main:app --reload
 - `CONF_PASSWORD`
 - `CONF_VERIFY_SSL=false`
 - `SYNC_ADMIN_TOKEN`
+- `AUTH_SECRET_KEY`
 - `DATABASE_URL`
 - `WIKI_ROOT`
 - `CACHE_ROOT`
+
+## 권한 모델
+
+- `viewer`
+  - 문서 조회, 검색, 그래프, assistant 질문
+- `editor`
+  - viewer 권한
+  - knowledge 문서 편집
+  - query wiki 생성
+  - knowledge 재생성
+  - assistant 답변 저장
+- `admin`
+  - editor 권한
+  - 사용자 관리
+  - 운영자 세션 기반 관리 기능
+
+앱 시작 시 bootstrap 계정이 자동 생성됩니다. 기본값은 아래와 같고 `.env` 에서 바꿀 수 있습니다.
+
+- `admin / admin-pass`
+- `editor / editor-pass`
+- `viewer / viewer-pass`
 
 ## 실행
 
