@@ -187,7 +187,7 @@ def test_synthesis_route_renders_space_summary(tmp_path, sample_settings_dict):
     assert "핵심 문서" in response.text
 
 
-def test_graph_page_renders_reset_button_and_space_name(tmp_path, sample_settings_dict):
+def test_graph_page_renders_navigation_controls_and_scope_selector_without_synthesis_legend(tmp_path, sample_settings_dict):
     sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
     sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
     settings = Settings.model_validate(sample_settings_dict)
@@ -197,8 +197,16 @@ def test_graph_page_renders_reset_button_and_space_name(tmp_path, sample_setting
     response = client.get("/graph?space=DEMO&view=knowledge")
 
     assert response.status_code == 200
+    assert "확대" in response.text
+    assert "축소" in response.text
+    assert "보기 리셋" in response.text
     assert "위치 리셋" in response.text
+    assert ">전체 그래프<" in response.text
     assert "Demo Showcase" in response.text
+    assert 'name="space"' in response.text
+    assert "Keyword Source" in response.text
+    assert "Keyword Related" in response.text
+    assert "Synthesis" not in response.text
 
 
 def test_knowledge_route_renders_global_keyword_page(tmp_path, sample_settings_dict):

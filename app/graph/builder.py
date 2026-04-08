@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import re
 
@@ -21,9 +22,55 @@ def _kind_color(kind: str, space_key: str) -> str:
         "keyword": "#0f766e",
         "analysis": "#9a3412",
         "query": "#7c3aed",
-        "synthesis": "#1d4ed8",
         "page": _space_color(space_key),
     }.get(kind, _space_color(space_key))
+
+
+def _kind_importance_weight(kind: str) -> float:
+    normalized = normalize_knowledge_kind(kind or "page")
+    return {
+        "query": 6.0,
+        "keyword": 4.5,
+        "entity": 4.0,
+        "analysis": 3.0,
+        "lint": 1.5,
+        "page": 0.0,
+    }.get(normalized, 0.0)
+
+
+def _annotate_node_metrics(nodes: list[dict], edges: list[dict]) -> list[dict]:
+    degree: dict[str, int] = {}
+    inbound: dict[str, int] = {}
+    for edge in edges:
+        source = edge["source"]
+        target = edge["target"]
+        degree[source] = degree.get(source, 0) + 1
+        degree[target] = degree.get(target, 0) + 1
+        inbound[target] = inbound.get(target, 0) + 1
+
+    annotated: list[dict] = []
+    for node in nodes:
+        kind = normalize_knowledge_kind(str(node.get("kind") or "page"))
+        source_page_count = int(node.get("source_page_count") or len(node.get("source_spaces") or []) or (1 if kind == "page" else 0))
+        degree_score = float(degree.get(node["id"], 0))
+        inbound_score = float(inbound.get(node["id"], 0))
+        importance = (
+            degree_score * 1.4
+            + inbound_score * 0.8
+            + math.log2(source_page_count + 1) * 2.0
+            + _kind_importance_weight(kind)
+        )
+        radius = max(8.0, min(24.0, 8.0 + math.sqrt(max(importance, 1.0)) * 2.2))
+        annotated.append(
+            {
+                **node,
+                "kind": kind,
+                "importance": round(importance, 3),
+                "radius": round(radius, 2),
+                "label_size": round(max(11.0, min(18.0, 10.0 + radius / 3.4)), 2),
+            }
+        )
+    return annotated
 
 
 def _extract_refs(text: str) -> list[dict[str, str]]:
@@ -68,7 +115,7 @@ def build_graph_payload(nodes: list[dict], edges: list[dict], selected_space: st
         for edge in edges
         if edge["source"] in allowed_ids and edge["target"] in allowed_ids
     ]
-    return {"nodes": filtered_nodes, "edges": filtered_edges}
+    return {"nodes": _annotate_node_metrics(filtered_nodes, filtered_edges), "edges": filtered_edges}
 
 
 def write_graph_cache(root: Path, payload: dict) -> Path:
@@ -120,6 +167,13 @@ def build_knowledge_graph_payload(
                 "title": doc["title"],
                 "space_key": "global",
                 "source_spaces": source_spaces,
+                "source_page_count": len(
+                    {
+                        (ref["space_key"], ref["slug"])
+                        for ref in _extract_refs(doc.get("source_refs") or "")
+                        if ref["kind"] == "page"
+                    }
+                ),
                 "slug": doc["slug"],
                 "kind": kind,
                 "href": knowledge_href(kind, doc["slug"]),
@@ -154,6 +208,7 @@ def build_knowledge_graph_payload(
                         "id": page_node_id,
                         "title": page["title"],
                         "space_key": page["space_key"],
+                        "source_page_count": 1,
                         "slug": page["slug"],
                         "kind": "page",
                         "href": page["href"],
@@ -180,25 +235,11 @@ def build_knowledge_graph_payload(
                     register_edge(node_id, keyword_id, "analysis-keyword")
 
     for space_key, keyword_ids in keyword_nodes_by_space.items():
-        synthesis_id = f"synthesis:{space_key}"
-        register_node(
-            {
-                "id": synthesis_id,
-                "title": "Synthesis",
-                "space_key": "global",
-                "source_spaces": [space_key],
-                "slug": "synthesis",
-                "kind": "synthesis",
-                "href": f"/spaces/{space_key}/synthesis",
-                "color": _kind_color("synthesis", space_key),
-            }
-        )
-        for keyword_id in sorted(keyword_ids):
-            register_edge(synthesis_id, keyword_id, "synthesis-keyword")
         for idx, left in enumerate(keyword_ids):
             left_refs = keyword_page_refs.get(left, set())
             for right in keyword_ids[idx + 1 :]:
                 if left_refs and left_refs.intersection(keyword_page_refs.get(right, set())):
                     register_edge(left, right, "keyword-related")
 
-    return {"nodes": list(nodes.values()), "edges": list(edges.values())}
+    edge_list = list(edges.values())
+    return {"nodes": _annotate_node_metrics(list(nodes.values()), edge_list), "edges": edge_list}

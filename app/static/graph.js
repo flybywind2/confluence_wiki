@@ -11,23 +11,31 @@
   const response = await fetch(`/api/graph${query}`);
   const payload = await response.json();
   const resetButton = document.getElementById("graph-reset");
+  const zoomInButton = document.getElementById("graph-zoom-in");
+  const zoomOutButton = document.getElementById("graph-zoom-out");
+  const viewResetButton = document.getElementById("graph-view-reset");
 
   const width = container.clientWidth || 900;
   const height = container.clientHeight || 640;
-  const svg = d3.select(container).append("svg").attr("viewBox", `0 0 ${width} ${height}`);
+  const svg = d3.select(container)
+    .append("svg")
+    .attr("viewBox", `0 0 ${width} ${height}`)
+    .attr("class", "graph-svg");
+  const viewport = svg.append("g").attr("class", "graph-viewport");
   const initialPositions = new Map();
   let initialLayoutCaptured = false;
 
   const simulation = d3.forceSimulation(payload.nodes)
     .force("link", d3.forceLink(payload.edges).id(d => d.id).distance(d => {
-      if (d.type === "hierarchy" || d.type === "synthesis-keyword") return 90;
+      if (d.type === "hierarchy") return 90;
+      if (d.type === "analysis-keyword") return 100;
       if (d.type === "keyword-source") return 120;
       return 140;
     }))
     .force("charge", d3.forceManyBody().strength(-210))
     .force("center", d3.forceCenter(width / 2, height / 2));
 
-  const link = svg.append("g")
+  const link = viewport.append("g")
     .selectAll("line")
     .data(payload.edges)
     .join("line")
@@ -36,14 +44,13 @@
       if (d.type === "keyword-source") return "#0f766e";
       if (d.type === "keyword-related") return "#1d4ed8";
       if (d.type === "analysis-keyword") return "#9a3412";
-      if (d.type === "synthesis-keyword") return "#334155";
       return "#1d4ed8";
     })
-    .attr("stroke-width", d => d.type === "hierarchy" || d.type === "synthesis-keyword" ? 2.2 : 1.6)
+    .attr("stroke-width", d => d.type === "hierarchy" ? 2.2 : 1.6)
     .attr("stroke-dasharray", d => d.type === "keyword-related" || d.type === "analysis-keyword" ? "6 4" : null)
     .attr("stroke-opacity", 0.65);
 
-  const node = svg.append("g")
+  const node = viewport.append("g")
     .selectAll("g")
     .data(payload.nodes)
     .join("g")
@@ -51,6 +58,7 @@
     .call(
       d3.drag()
         .on("start", (event) => {
+          if (event.sourceEvent) event.sourceEvent.stopPropagation();
           if (!event.active) simulation.alphaTarget(0.3).restart();
           event.subject.fx = event.subject.x;
           event.subject.fy = event.subject.y;
@@ -72,15 +80,16 @@
     });
 
   node.append("circle")
-    .attr("r", 10)
+    .attr("r", d => d.radius || 10)
     .attr("fill", d => d.color || "#2f855a")
     .attr("stroke", "#fdf8ef")
     .attr("stroke-width", 2);
 
   node.append("text")
     .text(d => d.title)
-    .attr("font-size", 11)
-    .attr("dx", 14)
+    .attr("font-size", d => d.label_size || 11)
+    .attr("font-weight", d => (d.importance || 0) >= 8 ? 700 : 500)
+    .attr("dx", d => (d.radius || 10) + 4)
     .attr("dy", 4)
     .attr("fill", "#334155");
 
@@ -104,6 +113,15 @@
     if (resetButton) resetButton.disabled = false;
   });
 
+  const zoom = d3.zoom()
+    .scaleExtent([0.35, 4])
+    .on("zoom", (event) => {
+      viewport.attr("transform", event.transform);
+    });
+
+  svg.call(zoom);
+  svg.on("dblclick.zoom", null);
+
   if (resetButton) {
     resetButton.addEventListener("click", () => {
       if (!initialLayoutCaptured) return;
@@ -117,6 +135,24 @@
         item.fy = null;
       });
       render();
+    });
+  }
+
+  if (viewResetButton) {
+    viewResetButton.addEventListener("click", () => {
+      svg.transition().duration(220).call(zoom.transform, d3.zoomIdentity);
+    });
+  }
+
+  if (zoomInButton) {
+    zoomInButton.addEventListener("click", () => {
+      svg.transition().duration(180).call(zoom.scaleBy, 1.2);
+    });
+  }
+
+  if (zoomOutButton) {
+    zoomOutButton.addEventListener("click", () => {
+      svg.transition().duration(180).call(zoom.scaleBy, 1 / 1.2);
     });
   }
 })();

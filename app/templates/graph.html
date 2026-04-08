@@ -6,13 +6,13 @@
     <span class="eyebrow">Obsidian-Style Graph</span>
     <h1>문서 연결 그래프</h1>
     <p class="graph-scope">{{ selected_space_name }}</p>
-    <p>{% if selected_view == 'knowledge' %}주제 문서, 분석 문서, synthesis와 원문 근거의 연결을 시각화합니다.{% else %}부모-자식 관계와 문서 내 링크를 동시에 시각화합니다.{% endif %}</p>
+    <p>{% if selected_view == 'knowledge' %}키워드 문서, 검색 위키, 분석 문서와 원문 근거의 연결을 시각화합니다.{% else %}부모-자식 관계와 문서 내 링크를 동시에 시각화합니다.{% endif %}</p>
   </div>
   <div class="legend">
     {% if selected_view == 'knowledge' %}
     <span><i class="legend-line keyword-source"></i>Keyword Source</span>
     <span><i class="legend-line keyword-related"></i>Keyword Related</span>
-    <span><i class="legend-line synthesis-keyword"></i>Synthesis</span>
+    <span><i class="legend-line analysis-keyword"></i>Analysis Link</span>
     {% else %}
     <span><i class="legend-line hierarchy"></i>Hierarchy</span>
     <span><i class="legend-line wiki"></i>Wiki Link</span>
@@ -21,9 +21,15 @@
 </section>
 <section class="list-card facet-card">
   <form class="facet-form" action="/graph" method="get">
-    {% if selected_space and selected_space != 'all' %}
-    <input type="hidden" name="space" value="{{ selected_space }}" />
-    {% endif %}
+    <label>
+      <span>범위</span>
+      <select name="space">
+        <option value="all" {% if selected_space == 'all' %}selected{% endif %}>전체 그래프</option>
+        {% for space in spaces %}
+        <option value="{{ space.space_key }}" {% if selected_space == space.space_key %}selected{% endif %}>{{ space.name or space.space_key }}</option>
+        {% endfor %}
+      </select>
+    </label>
     <label>
       <span>그래프 보기</span>
       <select name="view">
@@ -36,6 +42,11 @@
 </section>
 <section class="graph-card">
   <div class="graph-toolbar">
+    <div class="graph-toolbar-actions">
+      <button type="button" class="graph-reset" id="graph-zoom-in">확대</button>
+      <button type="button" class="graph-reset" id="graph-zoom-out">축소</button>
+      <button type="button" class="graph-reset" id="graph-view-reset">보기 리셋</button>
+    </div>
     <button type="button" class="graph-reset" id="graph-reset" disabled>위치 리셋</button>
   </div>
   <div id="graph-canvas" data-space="{{ selected_space }}" data-view="{{ selected_view }}"></div>
