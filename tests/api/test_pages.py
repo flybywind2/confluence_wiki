@@ -1,4 +1,6 @@
 from fastapi.testclient import TestClient
+from datetime import timedelta
+
 from sqlalchemy import select
 
 from app.core.config import Settings
@@ -7,6 +9,7 @@ from app.db.models import KnowledgeDocument, Page, PageVersion, Space
 from app.db.session import create_session_factory
 from app.demo_seed import seed_demo_content
 from app.services.knowledge_service import KnowledgeService
+from app.services.space_registry import ensure_global_knowledge_space
 from app.main import app, create_app
 from app.services.wiki_writer import write_markdown_file
 
@@ -23,6 +26,30 @@ def _login(client: TestClient, role: str = "viewer") -> None:
         follow_redirects=False,
     )
     assert response.status_code == 303
+
+
+def _append_global_knowledge_docs(settings: Settings, count: int, *, summary_prefix: str = "요약") -> None:
+    session_factory = create_session_factory(settings.database_url)
+    session = session_factory()
+    try:
+        global_space = ensure_global_knowledge_space(session)
+        base_time = global_space.updated_at
+        for index in range(count):
+            doc = KnowledgeDocument(
+                space_id=global_space.id,
+                kind="analysis",
+                slug=f"board-doc-{index:02d}",
+                title=f"보드 문서 {index:02d}",
+                markdown_path=f"global/knowledge/analyses/board-doc-{index:02d}.md",
+                summary=f"# 보드 문서 {index:02d}\n\n{summary_prefix} {index:02d} 상세 설명과 근거 문장을 담습니다.",
+                source_refs="",
+                created_at=base_time + timedelta(minutes=index),
+                updated_at=base_time + timedelta(minutes=index),
+            )
+            session.add(doc)
+        session.commit()
+    finally:
+        session.close()
 
 
 def test_index_page_hides_space_selector_and_document_kind_filter():
@@ -193,6 +220,70 @@ def test_knowledge_board_renders_table_and_filters(tmp_path, sample_settings_dic
     assert "키워드 문서" in response.text
     assert "참조 공간" in response.text
     assert "원문 수" in response.text
+
+
+def test_knowledge_board_paginates_and_sanitizes_summary(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+    _append_global_knowledge_docs(settings, 15)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
+
+    first_page = client.get("/knowledge-board")
+    second_page = client.get("/knowledge-board?page=2")
+
+    assert first_page.status_code == 200
+    assert second_page.status_code == 200
+    assert "page=2" in first_page.text
+    assert 'class="pagination"' in first_page.text
+    assert "보드 문서 14" in first_page.text
+    assert "보드 문서 00" not in first_page.text
+    assert "보드 문서 00" in second_page.text
+    assert "# 보드 문서 14" not in first_page.text
+    assert "요약 14 상세 설명과 근거 문장을 담습니다" in first_page.text
+
+
+def test_home_page_paginates_long_knowledge_lists(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+    _append_global_knowledge_docs(settings, 18, summary_prefix="홈")
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
+
+    first_page = client.get("/")
+    second_page = client.get("/?page=2")
+
+    assert first_page.status_code == 200
+    assert second_page.status_code == 200
+    assert 'class="pagination"' in first_page.text
+    assert "page=2" in first_page.text
+    assert "보드 문서 17" in first_page.text
+    assert "보드 문서 03" not in first_page.text
+    assert "보드 문서 03" in second_page.text
+
+
+def test_sidebar_navigation_marks_active_section(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
+
+    home = client.get("/")
+    board = client.get("/knowledge-board")
+
+    assert home.status_code == 200
+    assert board.status_code == 200
+    assert 'href="/" class="active"' in home.text
+    assert 'href="/knowledge-board" class="active"' in board.text
 
 
 def test_page_view_renders_breadcrumb_and_meta_description(tmp_path, sample_settings_dict):

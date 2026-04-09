@@ -34,9 +34,10 @@
           </div>
         </section>
         <nav class="sidebar-nav">
-          <a href="/">문서 홈</a>
-          <a href="/knowledge-board">전체 지식</a>
-          <a href="/graph{% if selected_space and selected_space != 'all' %}?space={{ selected_space }}{% endif %}">Graph View</a>
+          {% set current_path = request.url.path %}
+          <a href="/" class="{% if current_path == '/' or current_path == '/search' or current_path.startswith('/spaces/') %}active{% endif %}">문서 홈</a>
+          <a href="/knowledge-board" class="{% if current_path == '/knowledge-board' %}active{% endif %}">전체 지식</a>
+          <a href="/graph{% if selected_space and selected_space != 'all' %}?space={{ selected_space }}{% endif %}" class="{% if current_path == '/graph' %}active{% endif %}">Graph View</a>
         </nav>
         <form class="search-box" action="/search" method="get">
           <input type="text" name="q" placeholder="문서 검색" value="{{ search_query or '' }}" />

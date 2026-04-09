@@ -37,6 +37,11 @@ from app.services.wiki_qa import WikiQAService
 router = APIRouter()
 _RAW_PAGE_REF_RE = re.compile(r"(?:/spaces/|spaces/)(?P<space_key>[^/\]]+)/pages/(?P<slug>[^|\]\s]+)")
 _SOURCE_TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+_MARKDOWN_LINK_RE = re.compile(r"\[(?P<label>[^\]]+)\]\((?P<href>[^)]+)\)")
+_WIKI_LINK_RE = re.compile(r"!\[\[(?P<embed>[^\]]+)\]\]|\[\[(?P<target>[^\]|]+)(?:\|(?P<label>[^\]]+))?\]\]")
+_MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*")
+_MARKDOWN_LIST_RE = re.compile(r"^[>\-\*\d\.\)\s]+")
+_MARKDOWN_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$")
 
 
 def _templates(request: Request) -> Jinja2Templates:
@@ -174,12 +179,128 @@ def _with_sidebar_metrics(context: dict, session) -> dict:
     return enriched
 
 
+def _replace_wiki_link_with_label(match: re.Match[str]) -> str:
+    if match.group("embed"):
+        return ""
+    label = match.group("label")
+    target = match.group("target") or ""
+    if label:
+        return label
+    return target.rsplit("/", 1)[-1]
+
+
 def _display_document_title(space_key: str | None, title: str | None) -> str:
     normalized = str(title or "").strip()
     prefix = f"{space_key} " if space_key else ""
     if normalized.startswith(prefix):
         return normalized[len(prefix) :]
     return normalized
+
+
+def _display_summary_excerpt(text: str | None, *, title: str | None = None, limit: int = 180) -> str:
+    normalized_title = " ".join(str(title or "").split()).strip().lower()
+    cleaned_segments: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or _MARKDOWN_TABLE_SEPARATOR_RE.match(stripped):
+            continue
+        if stripped.startswith(("```", "> [!", "![[", "![", "---")):
+            continue
+        if stripped.startswith("|"):
+            cells = [cell.strip() for cell in stripped.strip("|").split("|") if cell.strip()]
+            stripped = " / ".join(cells[:3])
+        stripped = _MARKDOWN_HEADING_RE.sub("", stripped)
+        stripped = _MARKDOWN_LIST_RE.sub("", stripped)
+        stripped = _MARKDOWN_LINK_RE.sub(lambda match: match.group("label"), stripped)
+        stripped = _WIKI_LINK_RE.sub(_replace_wiki_link_with_label, stripped)
+        stripped = re.sub(r"`([^`]*)`", r"\1", stripped)
+        stripped = BeautifulSoup(stripped, "html.parser").get_text(" ", strip=True)
+        stripped = " ".join(stripped.split()).strip(" -|")
+        if not stripped:
+            continue
+        if normalized_title and stripped.lower() == normalized_title:
+            continue
+        if stripped not in cleaned_segments:
+            cleaned_segments.append(stripped)
+    if not cleaned_segments:
+        return "-"
+    excerpt_parts: list[str] = []
+    total_length = 0
+    for segment in cleaned_segments:
+        separator_length = 2 if excerpt_parts else 0
+        if total_length + len(segment) + separator_length > limit:
+            break
+        excerpt_parts.append(segment)
+        total_length += len(segment) + separator_length
+    excerpt = " · ".join(excerpt_parts or cleaned_segments[:1]).strip()
+    return excerpt[:limit].rstrip(" .,") if excerpt else "-"
+
+
+def _paginate_items(items: list[dict], page: int, per_page: int) -> tuple[list[dict], dict | None]:
+    total_items = len(items)
+    if total_items <= 0:
+        return items, None
+    total_pages = max(1, (total_items + per_page - 1) // per_page)
+    current_page = min(max(page, 1), total_pages)
+    start = (current_page - 1) * per_page
+    end = start + per_page
+    sliced = items[start:end]
+    if total_pages == 1:
+        return sliced, None
+
+    window: list[int | None] = []
+    if total_pages <= 7:
+        window = list(range(1, total_pages + 1))
+    else:
+        candidates = {1, total_pages}
+        for value in range(current_page - 2, current_page + 3):
+            if 1 <= value <= total_pages:
+                candidates.add(value)
+        ordered = sorted(candidates)
+        previous = None
+        for number in ordered:
+            if previous is not None and number - previous > 1:
+                window.append(None)
+            window.append(number)
+            previous = number
+    return sliced, {
+        "page": current_page,
+        "per_page": per_page,
+        "total_items": total_items,
+        "total_pages": total_pages,
+        "has_prev": current_page > 1,
+        "has_next": current_page < total_pages,
+        "prev_page": current_page - 1,
+        "next_page": current_page + 1,
+        "window": window,
+    }
+
+
+def _pagination_links(path: str, params: dict[str, str], pagination: dict | None) -> dict | None:
+    if not pagination:
+        return None
+
+    def build_href(page_number: int) -> str:
+        query = {key: value for key, value in params.items() if value not in {"", "all", None}}
+        if page_number > 1:
+            query["page"] = str(page_number)
+        else:
+            query.pop("page", None)
+        suffix = f"?{urlencode(query)}" if query else ""
+        return f"{path}{suffix}"
+
+    pages = []
+    for item in pagination["window"]:
+        if item is None:
+            pages.append({"number": None, "href": None, "current": False})
+            continue
+        pages.append({"number": item, "href": build_href(item), "current": item == pagination["page"]})
+    return {
+        **pagination,
+        "pages": pages,
+        "prev_href": build_href(pagination["prev_page"]) if pagination["has_prev"] else None,
+        "next_href": build_href(pagination["next_page"]) if pagination["has_next"] else None,
+    }
 
 
 def _is_editable_knowledge_kind(kind: str) -> bool:
@@ -370,7 +491,7 @@ def _page_result_item(page: Page, space_key: str, space_name: str) -> dict:
         "space_key": space_key,
         "space_name": space_name,
         "href": f"/spaces/{space_key}/pages/{page.slug}",
-        "updated_at_label": str(page.updated_at_remote) if page.updated_at_remote else "",
+        "updated_at_label": _format_source_date(page.updated_at_remote),
         "kind_label": "원문",
         "sort_value": page.updated_at_remote.isoformat() if page.updated_at_remote else "",
     }
@@ -383,7 +504,7 @@ def _knowledge_result_item(doc: KnowledgeDocument, space_key: str, space_name: s
         "space_key": space_key,
         "space_name": space_name,
         "href": knowledge_href(doc.kind, doc.slug),
-        "updated_at_label": str(doc.updated_at),
+        "updated_at_label": _format_source_date(doc.updated_at),
         "kind_label": knowledge_label(doc.kind),
         "sort_value": doc.updated_at.isoformat(),
     }
@@ -766,6 +887,7 @@ async def index(
     space: str | None = None,
     kind: str | None = None,
     recent: str | None = None,
+    page: int = Query(default=1, ge=1),
 ) -> HTMLResponse:
     session = _session_factory(request)()
     try:
@@ -790,7 +912,12 @@ async def index(
             if _is_user_visible_knowledge(doc) and _matches_filters(doc, kind, recent_days) and _space_filter_matches(doc, space)
         ]
         pages.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
-        pages = pages[:20]
+        pages, pagination = _paginate_items(pages, page, per_page=10)
+        pagination = _pagination_links(
+            request.url.path,
+            {"space": space or "", "kind": kind or "", "recent": recent or ""},
+            pagination,
+        )
         show_home_rail = (space or "all") == "all"
         featured_topics = []
         recent_sources = []
@@ -846,13 +973,14 @@ async def index(
                 "pages": pages,
                 "selected_kind": normalize_knowledge_kind(kind) if kind and kind != "all" else "all",
                 "selected_recent": recent or "all",
+                "pagination": pagination,
                 "synthesis_href": f"/spaces/{space}/synthesis" if space and space != "all" else None,
                 "filter_action": request.url.path,
                 "show_home_rail": show_home_rail,
                 "featured_topics": featured_topics,
                 "recent_sources": recent_sources,
                 "meta_description": _meta_description(
-                    f"{(space or '전체')} space 문서 홈입니다. 최근 문서 {len(pages)}건을 표시합니다."
+                    f"{(space or '전체')} space 문서 홈입니다. 최근 문서 {pagination['total_items'] if pagination else len(pages)}건을 표시합니다."
                 ),
             }, session),
         )
@@ -866,6 +994,7 @@ async def knowledge_board(
     q: str = Query(default=""),
     kind: str | None = Query(default=None),
     recent: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
 ) -> HTMLResponse:
     session = _session_factory(request)()
     try:
@@ -896,10 +1025,16 @@ async def knowledge_board(
                     **_knowledge_result_item(doc, "global", ", ".join(_space_names_for_doc(doc, space_name_by_key))),
                     "source_space_names": _space_names_for_doc(doc, space_name_by_key),
                     "source_count": _source_page_count_for_doc(doc),
-                    "summary": (doc.summary or "").strip(),
+                    "summary": _display_summary_excerpt(doc.summary, title=doc.title),
                 }
             )
         board_rows.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
+        board_rows, pagination = _paginate_items(board_rows, page, per_page=12)
+        pagination = _pagination_links(
+            request.url.path,
+            {"q": q, "kind": kind or "", "recent": recent or ""},
+            pagination,
+        )
         return _templates(request).TemplateResponse(
             request,
             "knowledge_board.html",
@@ -913,7 +1048,10 @@ async def knowledge_board(
                 "board_query": q,
                 "selected_kind": normalize_knowledge_kind(kind) if kind and kind != "all" else "all",
                 "selected_recent": recent or "all",
-                "meta_description": _meta_description(f"전체 지식 문서 {len(board_rows)}건을 게시판 형태로 조회합니다."),
+                "pagination": pagination,
+                "meta_description": _meta_description(
+                    f"전체 지식 문서 {pagination['total_items'] if pagination else len(board_rows)}건을 게시판 형태로 조회합니다."
+                ),
             }, session),
         )
     finally:
@@ -926,8 +1064,9 @@ async def space_index(
     space_key: str,
     kind: str | None = Query(default=None),
     recent: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
 ) -> HTMLResponse:
-    return await index(request, space=space_key, kind=kind, recent=recent)
+    return await index(request, space=space_key, kind=kind, recent=recent, page=page)
 
 
 @router.get("/knowledge/{kind}/{slug}", response_class=HTMLResponse)
@@ -1217,6 +1356,7 @@ async def search(
     space: str | None = None,
     kind: str | None = None,
     recent: str | None = None,
+    page: int = Query(default=1, ge=1),
 ) -> HTMLResponse:
     session = _session_factory(request)()
     try:
@@ -1250,6 +1390,12 @@ async def search(
                 if _is_user_visible_knowledge(doc) and _matches_filters(doc, kind, recent_days) and _space_filter_matches(doc, space)
             ]
             results.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
+        results, pagination = _paginate_items(results, page, per_page=10)
+        pagination = _pagination_links(
+            request.url.path,
+            {"q": q, "space": space or "", "kind": kind or "", "recent": recent or ""},
+            pagination,
+        )
         return _templates(request).TemplateResponse(
             request,
             "index.html",
@@ -1263,10 +1409,11 @@ async def search(
                 "search_query": q,
                 "selected_kind": normalize_knowledge_kind(kind) if kind and kind != "all" else "all",
                 "selected_recent": recent or "all",
+                "pagination": pagination,
                 "synthesis_href": f"/spaces/{space}/synthesis" if space and space != "all" else None,
                 "filter_action": request.url.path,
                 "meta_description": _meta_description(
-                    f"검색어 {q} 에 대한 결과 {len(results)}건입니다. 범위는 {(space or '전체 위키')} 입니다."
+                    f"검색어 {q} 에 대한 결과 {pagination['total_items'] if pagination else len(results)}건입니다. 범위는 {(space or '전체 위키')} 입니다."
                 ),
             }, session),
         )

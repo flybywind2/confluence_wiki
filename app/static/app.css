@@ -248,6 +248,48 @@ body {
 .knowledge-board-table a:hover {
   color: var(--accent);
 }
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(216, 207, 190, 0.7);
+}
+.pagination-pages {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pagination-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  padding: 9px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(216, 207, 190, 0.9);
+  background: #fffdf8;
+  color: var(--ink);
+  text-decoration: none;
+  font-weight: 700;
+}
+.pagination-link.active {
+  background: var(--accent-soft);
+  border-color: rgba(31, 111, 95, 0.18);
+  color: var(--accent);
+}
+.pagination-link.disabled {
+  color: rgba(91, 100, 115, 0.55);
+  background: rgba(249, 244, 232, 0.7);
+}
+.pagination-ellipsis {
+  color: var(--muted);
+  padding: 0 2px;
+}
 .page-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
 .page-list li { padding: 14px 0; border-bottom: 1px solid rgba(216, 207, 190, 0.7); }
 .page-list a { color: var(--ink); font-weight: 700; text-decoration: none; }

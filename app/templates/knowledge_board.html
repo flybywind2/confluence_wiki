@@ -40,7 +40,10 @@
 <section class="list-card knowledge-board-card">
   <div class="section-header">
     <h2>지식 문서</h2>
-    <span>{{ board_rows|length }}건</span>
+    <span>
+      {{ pagination.total_items if pagination else board_rows|length }}건
+      {% if pagination %} · {{ pagination.page }}/{{ pagination.total_pages }} 페이지{% endif %}
+    </span>
   </div>
   {% if board_rows %}
   <div class="knowledge-board-table-wrap">
@@ -69,6 +72,29 @@
       </tbody>
     </table>
   </div>
+  {% if pagination %}
+  <nav class="pagination" aria-label="전체 지식 페이지">
+    {% if pagination.has_prev %}
+    <a class="pagination-link" href="{{ pagination.prev_href }}">이전</a>
+    {% else %}
+    <span class="pagination-link disabled">이전</span>
+    {% endif %}
+    <div class="pagination-pages">
+      {% for item in pagination.pages %}
+        {% if item.number %}
+        <a class="pagination-link {% if item.current %}active{% endif %}" href="{{ item.href }}">{{ item.number }}</a>
+        {% else %}
+        <span class="pagination-ellipsis">…</span>
+        {% endif %}
+      {% endfor %}
+    </div>
+    {% if pagination.has_next %}
+    <a class="pagination-link" href="{{ pagination.next_href }}">다음</a>
+    {% else %}
+    <span class="pagination-link disabled">다음</span>
+    {% endif %}
+  </nav>
+  {% endif %}
   {% else %}
   <p class="empty-state">조건에 맞는 지식 문서가 없습니다.</p>
   {% endif %}

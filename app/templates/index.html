@@ -48,7 +48,11 @@
     <section class="list-card {% if show_home_rail %}dashboard-list-card{% endif %}">
       <div class="section-header">
         <h2>{% if search_query %}검색 결과{% else %}최근 문서{% endif %}</h2>
-        <span>{{ pages|length }}건{% if selected_recent and selected_recent != 'all' %} · {{ selected_recent }}{% endif %}</span>
+        <span>
+          {{ pagination.total_items if pagination else pages|length }}건
+          {% if pagination %} · {{ pagination.page }}/{{ pagination.total_pages }} 페이지{% endif %}
+          {% if selected_recent and selected_recent != 'all' %} · {{ selected_recent }}{% endif %}
+        </span>
       </div>
       {% if pages %}
       <div class="{% if show_home_rail %}page-list-scroll{% endif %}">
@@ -69,6 +73,29 @@
         {% endfor %}
       </ul>
       </div>
+      {% if pagination %}
+      <nav class="pagination" aria-label="문서 목록 페이지">
+        {% if pagination.has_prev %}
+        <a class="pagination-link" href="{{ pagination.prev_href }}">이전</a>
+        {% else %}
+        <span class="pagination-link disabled">이전</span>
+        {% endif %}
+        <div class="pagination-pages">
+          {% for item in pagination.pages %}
+            {% if item.number %}
+            <a class="pagination-link {% if item.current %}active{% endif %}" href="{{ item.href }}">{{ item.number }}</a>
+            {% else %}
+            <span class="pagination-ellipsis">…</span>
+            {% endif %}
+          {% endfor %}
+        </div>
+        {% if pagination.has_next %}
+        <a class="pagination-link" href="{{ pagination.next_href }}">다음</a>
+        {% else %}
+        <span class="pagination-link disabled">다음</span>
+        {% endif %}
+      </nav>
+      {% endif %}
       {% else %}
       <p class="empty-state">
         {% if search_query %}
