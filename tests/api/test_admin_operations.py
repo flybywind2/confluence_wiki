@@ -56,6 +56,7 @@ def test_admin_can_open_operations_page(tmp_path, sample_settings_dict):
     assert 'id="admin-sync-progress-fill"' in response.text
     assert 'id="admin-sync-events"' in response.text
     assert 'data-admin-sync-trigger="true"' in response.text
+    assert response.text.index("<h2>Bootstrap 대상</h2>") < response.text.index('<section class="history-panel" id="admin-sync-jobs">')
 
 
 def test_admin_can_register_space_and_save_schedule(tmp_path, sample_settings_dict):
