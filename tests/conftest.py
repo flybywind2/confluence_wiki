@@ -12,6 +12,7 @@ def sample_settings_dict(tmp_path: Path) -> dict[str, object]:
         "CONF_USERNAME": "user",
         "CONF_PASSWORD": "pass",
         "CONF_VERIFY_SSL": False,
+        "INTERNAL_SCHEDULER_ENABLED": False,
         "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
         "WIKI_ROOT": str(tmp_path / "wiki"),
         "CACHE_ROOT": str(tmp_path / "cache"),

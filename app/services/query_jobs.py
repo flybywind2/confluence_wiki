@@ -8,7 +8,9 @@ from typing import Callable
 import uuid
 
 from app.core.config import Settings
+from app.db.session import create_session_factory
 from app.services.knowledge_service import KnowledgeService
+from app.services.schedule_service import ScheduleService
 from app.services.sync_service import SyncService
 
 ProgressCallback = Callable[[int, str], None]
@@ -37,6 +39,7 @@ class QueryJob:
 class QueryJobManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.session_factory = create_session_factory(settings.database_url)
         self._jobs: dict[str, QueryJob] = {}
         self._pending_job_ids: list[str] = []
         self._running_job_id: str | None = None
@@ -327,6 +330,12 @@ class QueryJobManager:
                     )
                 )
         except Exception as exc:
+            if not is_bootstrap:
+                self._record_incremental_schedule_result(
+                    space_key=str(job.space_key or ""),
+                    status="failed",
+                    error=str(exc),
+                )
             self._update(
                 job.id,
                 status="failed",
@@ -335,6 +344,12 @@ class QueryJobManager:
                 error=str(exc),
             )
             return
+        if not is_bootstrap:
+            self._record_incremental_schedule_result(
+                space_key=str(job.space_key or ""),
+                status="completed",
+                error=None,
+            )
         self._update(
             job.id,
             status="completed",
@@ -343,6 +358,23 @@ class QueryJobManager:
             href=None,
             error=None,
         )
+
+    def _record_incremental_schedule_result(self, *, space_key: str, status: str, error: str | None) -> None:
+        if not space_key:
+            return
+        session = self.session_factory()
+        try:
+            ScheduleService(self.settings).record_incremental_result(
+                session,
+                space_key=space_key,
+                status=status,
+                error=error,
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+        finally:
+            session.close()
 
     def _update(
         self,

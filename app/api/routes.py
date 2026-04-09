@@ -747,6 +747,8 @@ async def admin_operations(
             "enabled_schedule_count": sum(1 for row in operation_rows if row["schedule"]["enabled"]),
             "due_schedule_count": sum(1 for row in operation_rows if row["schedule"]["due"]),
             "app_timezone": _settings(request).app_timezone,
+            "internal_scheduler_enabled": _settings(request).internal_scheduler_enabled,
+            "internal_scheduler_poll_seconds": _settings(request).internal_scheduler_poll_seconds,
         }
         return _templates(request).TemplateResponse(
             request,

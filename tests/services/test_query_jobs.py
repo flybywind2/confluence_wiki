@@ -4,6 +4,8 @@ import time
 from threading import Event
 
 from app.core.config import Settings
+from app.db.models import Space, SyncSchedule
+from app.db.session import create_session_factory
 from app.services.knowledge_service import KnowledgeService
 from app.services.query_jobs import QueryJobManager
 from app.services.sync_service import SyncResult, SyncService
@@ -137,3 +139,49 @@ def test_query_job_manager_runs_bootstrap_job_with_progress(sample_settings_dict
     assert finished["message"] == "Bootstrap이 완료되었습니다."
     assert any(event["message"] == "페이지를 동기화하는 중입니다." for event in finished["events"])
     assert progress_messages == ["DEMO:9001"]
+
+
+def test_query_job_manager_marks_incremental_schedule_completed(sample_settings_dict, monkeypatch, tmp_path):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+        }
+    )
+    session = create_session_factory(settings.database_url)()
+    try:
+        space = Space(space_key="DEMO", name="Demo", enabled=True)
+        session.add(space)
+        session.flush()
+        session.add(
+            SyncSchedule(
+                space_id=space.id,
+                schedule_type="incremental",
+                enabled=True,
+                run_time="03:00",
+                timezone="Asia/Seoul",
+                last_status="queued",
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    async def fake_run_incremental_async(self, space_key: str, progress_callback=None):
+        return SyncResult(mode="incremental", space_key=space_key, processed_pages=1, processed_assets=0)
+
+    monkeypatch.setattr(SyncService, "run_incremental_async", fake_run_incremental_async)
+
+    manager = QueryJobManager(settings)
+    snapshot = manager.start_incremental_job(space_key="DEMO")
+    _wait_until(lambda: (manager.get_job(snapshot["id"]) or {}).get("status") == "completed")
+
+    session = create_session_factory(settings.database_url)()
+    try:
+        schedule = session.query(SyncSchedule).one()
+        assert schedule.last_status == "completed"
+        assert schedule.last_error_message is None
+    finally:
+        session.close()

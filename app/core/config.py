@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     sync_rate_limit_per_minute: int = Field(default=10, alias="SYNC_RATE_LIMIT_PER_MINUTE")
     sync_request_timeout_seconds: int = Field(default=30, alias="SYNC_REQUEST_TIMEOUT_SECONDS")
     sync_admin_token: str = Field(default="change-me", alias="SYNC_ADMIN_TOKEN")
+    internal_scheduler_enabled: bool = Field(default=True, alias="INTERNAL_SCHEDULER_ENABLED")
+    internal_scheduler_poll_seconds: int = Field(default=60, alias="INTERNAL_SCHEDULER_POLL_SECONDS")
 
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     llm_base_url: str = Field(alias="LLM_BASE_URL")

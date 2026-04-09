@@ -215,15 +215,23 @@
 
   <section class="history-panel">
     <div class="section-header">
-      <h2>외부 스케줄러</h2>
+      <h2>스케줄 실행 방식</h2>
     </div>
     <p class="page-summary">
-      인앱 스케줄러는 돌리지 않고, 외부 스케줄러가 아래 endpoint를 주기적으로 호출하는 구조입니다.
+      {% if operations_summary.internal_scheduler_enabled %}
+      앱 내부 스케줄러가 {{ operations_summary.internal_scheduler_poll_seconds }}초마다 도래한 증분 동기화 스케줄을 확인해 자동으로 큐에 넣습니다.
+      {% else %}
+      앱 내부 스케줄러가 꺼져 있어서, 외부 스케줄러가 아래 endpoint를 주기적으로 호출해야 합니다.
+      {% endif %}
     </p>
     <div class="history-banner">
-      <span><strong>Endpoint</strong> POST <code>/admin/schedules/run-due</code></span>
-      <span><strong>권장 주기</strong> 15분~30분</span>
+      <span><strong>내부 스케줄러</strong> {% if operations_summary.internal_scheduler_enabled %}활성{% else %}비활성{% endif %}</span>
+      <span><strong>확인 주기</strong> {{ operations_summary.internal_scheduler_poll_seconds }}초</span>
       <span><strong>기본 시간대</strong> {{ operations_summary.app_timezone }}</span>
+    </div>
+    <div class="history-banner">
+      <span><strong>외부 Endpoint</strong> POST <code>/admin/schedules/run-due</code></span>
+      <span><strong>권장 주기</strong> 15분~30분</span>
     </div>
   </section>
 </article>

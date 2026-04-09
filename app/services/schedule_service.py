@@ -154,6 +154,54 @@ class ScheduleService:
         session.flush()
         return rows
 
+    def claim_due_incremental_schedules(self, session: Session, *, now: datetime | None = None) -> list[str]:
+        schedules = session.scalars(
+            select(SyncSchedule)
+            .join(Space, Space.id == SyncSchedule.space_id)
+            .where(
+                SyncSchedule.schedule_type == "incremental",
+                Space.space_key != GLOBAL_KNOWLEDGE_SPACE_KEY,
+                Space.enabled.is_(True),
+                SyncSchedule.enabled.is_(True),
+            )
+            .order_by(Space.space_key.asc())
+        ).all()
+        effective_now = now or datetime.now(ZoneInfo(self.settings.app_timezone))
+        claimed_space_keys: list[str] = []
+        triggered_at = _utc_naive(datetime.now(timezone.utc))
+        for schedule in schedules:
+            snapshot = schedule_snapshot(schedule, now=effective_now)
+            if not snapshot["due"]:
+                continue
+            schedule.last_triggered_at = triggered_at
+            schedule.last_status = "queued"
+            schedule.last_error_message = None
+            claimed_space_keys.append(schedule.space.space_key)
+        session.flush()
+        return claimed_space_keys
+
+    def record_incremental_result(
+        self,
+        session: Session,
+        *,
+        space_key: str,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        schedule = session.scalar(
+            select(SyncSchedule)
+            .join(Space, Space.id == SyncSchedule.space_id)
+            .where(
+                SyncSchedule.schedule_type == "incremental",
+                Space.space_key == space_key,
+            )
+        )
+        if schedule is None:
+            return
+        schedule.last_status = status
+        schedule.last_error_message = error if status == "failed" else None
+        session.flush()
+
     async def run_due_incremental_schedules(self, session: Session, *, now: datetime | None = None) -> list[ScheduledRunResult]:
         schedules = session.scalars(
             select(SyncSchedule)
