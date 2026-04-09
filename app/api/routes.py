@@ -13,6 +13,7 @@ from fastapi import APIRouter, Form, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import OperationalError
 
 from app.core.knowledge import (
     GLOBAL_KNOWLEDGE_SPACE_KEY,
@@ -90,6 +91,14 @@ def _admin_redirect(*, notice: str | None = None, error: str | None = None) -> R
         params["error"] = error
     suffix = f"?{urlencode(params)}" if params else ""
     return RedirectResponse(url=f"/admin/operations{suffix}", status_code=303)
+
+
+def _is_sqlite_lock_error(exc: Exception) -> bool:
+    return "database is locked" in str(exc).lower()
+
+
+def _admin_write_locked_redirect(target: str) -> RedirectResponse:
+    return _admin_redirect(error=f"{target} 저장 중 DB가 사용 중입니다. 잠시 후 다시 시도해주세요.")
 
 
 def _ensure_html_role(session, request: Request, required_role: str = "viewer") -> User | RedirectResponse:
@@ -785,6 +794,11 @@ async def admin_upsert_space(
     except ValueError as exc:
         session.rollback()
         return _admin_redirect(error=str(exc))
+    except OperationalError as exc:
+        session.rollback()
+        if _is_sqlite_lock_error(exc):
+            return _admin_write_locked_redirect("공간 설정")
+        raise
     finally:
         session.close()
     return _admin_redirect(notice=f"{space_key} 공간 설정을 저장했습니다.")
@@ -815,6 +829,11 @@ async def admin_save_space_schedule(
     except ValueError as exc:
         session.rollback()
         return _admin_redirect(error=str(exc))
+    except OperationalError as exc:
+        session.rollback()
+        if _is_sqlite_lock_error(exc):
+            return _admin_write_locked_redirect("증분 스케줄")
+        raise
     finally:
         session.close()
     return _admin_redirect(notice=f"{space_key} 증분 스케줄을 저장했습니다.")

@@ -1,8 +1,11 @@
 from datetime import datetime
+from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
+from app.api import routes
 from app.core.config import Settings
 from app.db.models import Space, SyncSchedule
 from app.db.session import create_session_factory
@@ -37,6 +40,10 @@ def _login(client: TestClient, role: str = "admin"):
         follow_redirects=False,
     )
     assert response.status_code == 303
+
+
+def _redirect_error_message(location: str) -> str:
+    return parse_qs(urlparse(location).query).get("error", [""])[0]
 
 
 def test_admin_can_open_operations_page(tmp_path, sample_settings_dict):
@@ -101,6 +108,53 @@ def test_admin_can_register_space_and_save_schedule(tmp_path, sample_settings_di
         assert schedule.timezone == "Asia/Seoul"
     finally:
         session.close()
+
+
+def test_admin_schedule_save_returns_notice_when_database_is_locked(tmp_path, sample_settings_dict, monkeypatch):
+    settings, app = _make_app(tmp_path, sample_settings_dict)
+    client = TestClient(app)
+    _login(client, "admin")
+
+    session = create_session_factory(settings.database_url)()
+    try:
+        session.add(Space(space_key="OPS", name="Operations", root_page_id="123456", enabled=True))
+        session.commit()
+    finally:
+        session.close()
+
+    def fake_upsert_schedule(*args, **kwargs):
+        raise OperationalError("UPDATE sync_schedules", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(routes.ScheduleService, "upsert_incremental_schedule", fake_upsert_schedule)
+
+    response = client.post(
+        "/admin/spaces/OPS/schedule",
+        data={"enabled": "on", "run_time": "03:15", "timezone": "Asia/Seoul"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "잠시 후 다시 시도" in _redirect_error_message(response.headers["location"])
+
+
+def test_admin_space_save_returns_notice_when_database_is_locked(tmp_path, sample_settings_dict, monkeypatch):
+    _settings, app = _make_app(tmp_path, sample_settings_dict)
+    client = TestClient(app)
+    _login(client, "admin")
+
+    def fake_upsert_space(*args, **kwargs):
+        raise OperationalError("INSERT INTO spaces", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(routes, "upsert_space", fake_upsert_space)
+
+    response = client.post(
+        "/admin/spaces",
+        data={"space_key": "OPS", "name": "Operations", "root_page_id": "123456", "enabled": "on"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "잠시 후 다시 시도" in _redirect_error_message(response.headers["location"])
 
 
 def test_admin_can_trigger_bootstrap_from_operations_ui(tmp_path, sample_settings_dict, monkeypatch):
