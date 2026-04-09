@@ -92,7 +92,7 @@ def render_markdown(markdown_text: str) -> str:
         display = label.strip() if label.strip() else Path(target).name.replace("-", " ")
         return f"[{display}]({route})"
 
-    parser = MarkdownIt("commonmark", {"html": True, "linkify": True, "breaks": True})
+    parser = MarkdownIt("commonmark", {"html": True, "linkify": True, "breaks": True}).enable("table")
     hydrated = _WIKI_EMBED_RE.sub(_replace_embed, markdown_text)
     hydrated = _WIKI_LINK_RE.sub(_replace_link, hydrated)
     return parser.render(hydrated)

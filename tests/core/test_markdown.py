@@ -36,3 +36,22 @@ def test_extract_wiki_links_ignores_embeds_and_parses_obsidian_targets():
         "spaces/DEMO/pages/root-page-100",
         "knowledge/keywords/운영",
     ]
+
+
+def test_render_markdown_supports_pipe_tables():
+    markdown = "\n".join(
+        [
+            "| 항목 | 값 |",
+            "| --- | --- |",
+            "| 상태 | 정상 |",
+            "| 지연 | 3초 |",
+        ]
+    )
+
+    html = render_markdown(markdown)
+
+    assert "<table>" in html
+    assert "<thead>" in html
+    assert "<tbody>" in html
+    assert "<th>항목</th>" in html
+    assert "<td>정상</td>" in html
