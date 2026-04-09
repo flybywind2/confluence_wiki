@@ -1,4 +1,5 @@
 from datetime import datetime
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
@@ -11,6 +12,7 @@ from app.db.models import Space, SyncSchedule
 from app.db.session import create_session_factory
 from app.demo_seed import seed_demo_content
 from app.main import create_app
+from app.services.schedule_service import ScheduleService
 from app.services.sync_service import SyncResult, SyncService
 
 
@@ -62,6 +64,7 @@ def test_admin_can_open_operations_page(tmp_path, sample_settings_dict):
     assert 'id="admin-sync-current"' in response.text
     assert 'id="admin-sync-progress-fill"' in response.text
     assert 'id="admin-sync-events"' in response.text
+    assert 'id="admin-sync-cancel"' in response.text
     assert 'data-admin-sync-trigger="true"' in response.text
     assert response.text.index("<h2>Bootstrap 대상</h2>") < response.text.index('<section class="history-panel" id="admin-sync-jobs">')
 
@@ -171,11 +174,11 @@ def test_admin_can_trigger_bootstrap_from_operations_ui(tmp_path, sample_setting
 
     calls: list[tuple[str, str]] = []
 
-    async def fake_run_bootstrap(self, space_key: str, root_page_id: str):
+    async def fake_run_bootstrap_async(self, space_key: str, root_page_id: str, progress_callback=None, cancel_requested=None):
         calls.append((space_key, root_page_id))
         return SyncResult(mode="bootstrap", space_key=space_key, processed_pages=7, processed_assets=0)
 
-    monkeypatch.setattr(SyncService, "_run_bootstrap", fake_run_bootstrap)
+    monkeypatch.setattr(SyncService, "run_bootstrap_async", fake_run_bootstrap_async)
 
     response = client.post("/admin/spaces/OPS/bootstrap", follow_redirects=False)
 
@@ -218,11 +221,24 @@ def test_due_schedule_endpoint_runs_enabled_due_schedules(tmp_path, sample_setti
 
     calls: list[str] = []
 
-    async def fake_run_incremental(self, space_key: str, now=None):
-        calls.append(space_key)
-        return SyncResult(mode="incremental", space_key=space_key, processed_pages=3, processed_assets=0)
+    async def fake_run_due_incremental_schedules(self, session, now=None):
+        calls.append("OPS")
+        schedule = session.scalar(select(SyncSchedule).join(Space).where(Space.space_key == "OPS"))
+        assert schedule is not None
+        schedule.last_triggered_at = datetime(2026, 4, 9, 9, 30)
+        schedule.last_status = "completed"
+        schedule.last_error_message = None
+        return [
+            SimpleNamespace(
+                space_key="OPS",
+                schedule_id=1,
+                status="completed",
+                processed_pages=3,
+                error=None,
+            )
+        ]
 
-    monkeypatch.setattr(SyncService, "_run_incremental", fake_run_incremental)
+    monkeypatch.setattr(ScheduleService, "run_due_incremental_schedules", fake_run_due_incremental_schedules)
 
     response = client.post(
         "/admin/schedules/run-due",

@@ -1010,6 +1010,14 @@ body {
   gap: 14px;
 }
 
+.admin-sync-current-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: end;
+}
+
 .admin-sync-current-head h3 {
   margin: 6px 0 0;
   font-size: 1.18rem;

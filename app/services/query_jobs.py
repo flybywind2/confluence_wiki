@@ -11,7 +11,7 @@ from app.core.config import Settings
 from app.db.session import create_session_factory
 from app.services.knowledge_service import KnowledgeService
 from app.services.schedule_service import ScheduleService
-from app.services.sync_service import SyncService
+from app.services.sync_service import SyncCancelledError, SyncService
 
 ProgressCallback = Callable[[int, str], None]
 
@@ -34,6 +34,7 @@ class QueryJob:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     events: list[dict[str, object]] = field(default_factory=list)
+    cancel_requested: bool = False
 
 
 class QueryJobManager:
@@ -158,6 +159,31 @@ class QueryJobManager:
                 return None
             return self._snapshot_locked(job)
 
+    def cancel_job(self, job_id: str) -> dict[str, object]:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise ValueError("job not found")
+            if job.status == "queued":
+                job.cancel_requested = True
+                job.status = "cancelled"
+                job.progress = max(job.progress, 0)
+                job.message = "작업을 취소했습니다."
+                job.updated_at = datetime.now().isoformat()
+                job.events.append(self._event(progress=job.progress, status=job.status, message=job.message))
+                self._pending_job_ids = [candidate for candidate in self._pending_job_ids if candidate != job.id]
+                return self._snapshot_locked(job)
+            if job.status == "running":
+                if job.job_type not in {"bootstrap", "incremental"}:
+                    raise ValueError("job cannot be cancelled")
+                job.cancel_requested = True
+                job.message = "취소 요청을 보냈습니다."
+                job.updated_at = datetime.now().isoformat()
+                if not job.events or job.events[-1].get("message") != job.message:
+                    job.events.append(self._event(progress=job.progress, status=job.status, message=job.message))
+                return self._snapshot_locked(job)
+            return self._snapshot_locked(job)
+
     def list_jobs(self, *, recent_limit: int = 8, job_types: set[str] | None = None) -> dict[str, object]:
         with self._lock:
             running = None
@@ -175,7 +201,7 @@ class QueryJobManager:
                 (
                     self._snapshot_locked(job)
                     for job in self._jobs.values()
-                    if job.status in {"completed", "failed"} and self._job_visible(job, job_types)
+                    if job.status in {"completed", "failed", "cancelled"} and self._job_visible(job, job_types)
                 ),
                 key=lambda item: item["updated_at"],
                 reverse=True,
@@ -214,6 +240,8 @@ class QueryJobManager:
                     next_job_id = self._pending_job_ids.pop(0)
                     candidate = self._jobs.get(next_job_id)
                     if candidate is None:
+                        continue
+                    if candidate.status != "queued":
                         continue
                     job_to_run = candidate
                     self._running_job_id = candidate.id
@@ -315,6 +343,7 @@ class QueryJobManager:
                             progress=progress,
                             message=message,
                         ),
+                        cancel_requested=lambda: self._is_cancel_requested(job.id),
                     )
                 )
             else:
@@ -327,8 +356,24 @@ class QueryJobManager:
                             progress=progress,
                             message=message,
                         ),
+                        cancel_requested=lambda: self._is_cancel_requested(job.id),
                     )
                 )
+        except SyncCancelledError:
+            if not is_bootstrap:
+                self._record_incremental_schedule_result(
+                    space_key=str(job.space_key or ""),
+                    status="cancelled",
+                    error=None,
+                )
+            self._update(
+                job.id,
+                status="cancelled",
+                progress=max(job.progress, 1),
+                message="사용자가 작업을 취소했습니다.",
+                error=None,
+            )
+            return
         except Exception as exc:
             if not is_bootstrap:
                 self._record_incremental_schedule_result(
@@ -436,6 +481,11 @@ class QueryJobManager:
                 return job
         return None
 
+    def _is_cancel_requested(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            return bool(job and job.cancel_requested)
+
     def _snapshot_locked(self, job: QueryJob) -> dict[str, object]:
         return self._snapshot(
             job,
@@ -498,6 +548,7 @@ class QueryJobManager:
             "created_at": job.created_at,
             "updated_at": job.updated_at,
             "events": list(job.events),
+            "cancel_requested": job.cancel_requested,
         }
 
     def _prune_old_jobs(self) -> None:
@@ -506,7 +557,7 @@ class QueryJobManager:
             stale_job_ids = {
                 key
                 for key, job in self._jobs.items()
-                if job.status in {"completed", "failed"} and datetime.fromisoformat(job.updated_at) < cutoff
+                if job.status in {"completed", "failed", "cancelled"} and datetime.fromisoformat(job.updated_at) < cutoff
             }
             for job_id in [
                 key

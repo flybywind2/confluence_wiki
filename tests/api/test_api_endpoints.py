@@ -451,3 +451,39 @@ def test_admin_sync_job_api_starts_bootstrap_job(tmp_path, sample_settings_dict)
     assert create_response.json()["space_key"] == "DEMO"
     assert list_response.status_code == 200
     assert list_response.json()["queued"][0]["job_type"] == "bootstrap"
+
+
+def test_admin_can_cancel_sync_job_via_api(tmp_path, sample_settings_dict):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+        }
+    )
+    test_app = create_app(settings=settings, allow_test_fallback=False)
+    seed_demo_content(settings=settings)
+
+    class FakeQueryJobs:
+        def cancel_job(self, job_id: str):
+            return {
+                "id": job_id,
+                "query": "DEMO Bootstrap",
+                "job_type": "bootstrap",
+                "space_key": "DEMO",
+                "status": "cancelled",
+                "cancel_requested": True,
+                "message": "사용자가 작업을 취소했습니다.",
+                "progress": 25,
+            }
+
+    test_app.state.query_jobs = FakeQueryJobs()
+    client = TestClient(test_app)
+    _login(client, "admin")
+
+    response = client.post("/api/query-jobs/sync-1/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["cancel_requested"] is True

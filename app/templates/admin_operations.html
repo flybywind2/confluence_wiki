@@ -130,7 +130,10 @@
           <div class="eyebrow">Now Running</div>
           <h3 id="admin-sync-current-title">실행 중인 작업</h3>
         </div>
-        <strong class="admin-sync-current-progress" id="admin-sync-progress-label">0%</strong>
+        <div class="admin-sync-current-actions">
+          <strong class="admin-sync-current-progress" id="admin-sync-progress-label">0%</strong>
+          <button type="button" id="admin-sync-cancel" class="source-link source-button" hidden>실행 취소</button>
+        </div>
       </div>
       <div class="admin-sync-progress-bar" aria-hidden="true">
         <span id="admin-sync-progress-fill"></span>

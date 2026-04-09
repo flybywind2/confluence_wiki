@@ -6,6 +6,7 @@
   const currentStatus = document.getElementById("admin-sync-current-status");
   const progressFill = document.getElementById("admin-sync-progress-fill");
   const progressLabel = document.getElementById("admin-sync-progress-label");
+  const cancelButton = document.getElementById("admin-sync-cancel");
   const eventsList = document.getElementById("admin-sync-events");
   const runningList = document.getElementById("admin-sync-running-list");
   const queuedList = document.getElementById("admin-sync-queued-list");
@@ -20,6 +21,7 @@
     !currentStatus ||
     !progressFill ||
     !progressLabel ||
+    !cancelButton ||
     !eventsList ||
     !runningList ||
     !queuedList ||
@@ -30,6 +32,7 @@
   }
 
   let pollTimer = null;
+  let currentRunningJobId = null;
 
   const stopPolling = () => {
     if (pollTimer) {
@@ -74,6 +77,10 @@
   const renderCurrentJob = (job) => {
     if (!job) {
       currentPanel.hidden = true;
+      currentRunningJobId = null;
+      cancelButton.hidden = true;
+      cancelButton.disabled = false;
+      cancelButton.textContent = "실행 취소";
       progressFill.style.width = "0%";
       progressLabel.textContent = "0%";
       currentStatus.textContent = "대기 중입니다.";
@@ -82,11 +89,21 @@
     }
 
     currentPanel.hidden = false;
+    currentRunningJobId = job.id || null;
     currentTitle.textContent = job.query || job.space_key || "실행 중인 작업";
     const progress = Number(job.progress || 0);
     progressFill.style.width = `${progress}%`;
     progressLabel.textContent = `${progress}%`;
     currentStatus.textContent = job.error || job.message || "처리 중입니다.";
+    if (job.job_type === "bootstrap" || job.job_type === "incremental") {
+      cancelButton.hidden = false;
+      cancelButton.disabled = Boolean(job.cancel_requested);
+      cancelButton.textContent = job.cancel_requested ? "취소 요청 중..." : "실행 취소";
+    } else {
+      cancelButton.hidden = true;
+      cancelButton.disabled = false;
+      cancelButton.textContent = "실행 취소";
+    }
     eventsList.innerHTML = "";
     for (const event of job.events || []) {
       const item = document.createElement("li");
@@ -169,6 +186,31 @@
       summary.textContent = error.message || "작업 시작에 실패했습니다.";
     }
   };
+
+  cancelButton.addEventListener("click", async () => {
+    if (!currentRunningJobId || cancelButton.disabled) {
+      return;
+    }
+    cancelButton.disabled = true;
+    cancelButton.textContent = "취소 요청 중...";
+    try {
+      const response = await fetch(`/api/query-jobs/${currentRunningJobId}/cancel`, {
+        method: "POST",
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.detail || "작업 취소에 실패했습니다.");
+      }
+      const overview = await fetchOverview();
+      if (hasActiveJobs(overview)) {
+        schedulePoll();
+      }
+    } catch (error) {
+      cancelButton.disabled = false;
+      cancelButton.textContent = "실행 취소";
+      summary.textContent = error.message || "작업 취소에 실패했습니다.";
+    }
+  });
 
   for (const form of triggers) {
     form.addEventListener("submit", (event) => {

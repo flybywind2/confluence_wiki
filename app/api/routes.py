@@ -1978,6 +1978,22 @@ async def api_query_job_status(request: Request, job_id: str) -> dict:
     return snapshot
 
 
+@router.post("/api/query-jobs/{job_id}/cancel")
+async def api_cancel_query_job(request: Request, job_id: str) -> JSONResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+    finally:
+        session.close()
+    try:
+        snapshot = _query_jobs(request).cancel_job(job_id)
+    except ValueError as exc:
+        if str(exc) == "job not found":
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return JSONResponse(snapshot)
+
+
 @router.post("/admin/bootstrap")
 async def admin_bootstrap(
     request: Request,

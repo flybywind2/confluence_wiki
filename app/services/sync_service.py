@@ -37,6 +37,11 @@ from app.services.wiki_writer import write_history_markdown, write_page_markdown
 
 logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[int, str], None]
+CancelCallback = Callable[[], bool]
+
+
+class SyncCancelledError(Exception):
+    pass
 
 
 @dataclass
@@ -90,33 +95,38 @@ class SyncService:
         space_key: str,
         root_page_id: str,
         progress_callback: ProgressCallback | None = None,
+        cancel_requested: CancelCallback | None = None,
     ) -> SyncResult:
         if progress_callback is None:
-            return await self._run_bootstrap(space_key, root_page_id)
-        return await self._run_bootstrap(space_key, root_page_id, progress_callback)
+            return await self._run_bootstrap(space_key, root_page_id, cancel_requested=cancel_requested)
+        return await self._run_bootstrap(space_key, root_page_id, progress_callback, cancel_requested)
 
     async def run_incremental_async(
         self,
         space_key: str,
         now: datetime | None = None,
         progress_callback: ProgressCallback | None = None,
+        cancel_requested: CancelCallback | None = None,
     ) -> SyncResult:
         if progress_callback is None:
-            return await self._run_incremental(space_key, now)
-        return await self._run_incremental(space_key, now, progress_callback)
+            return await self._run_incremental(space_key, now, cancel_requested=cancel_requested)
+        return await self._run_incremental(space_key, now, progress_callback, cancel_requested)
 
     async def _run_bootstrap(
         self,
         space_key: str,
         root_page_id: str,
         progress_callback: ProgressCallback | None = None,
+        cancel_requested: CancelCallback | None = None,
     ) -> SyncResult:
+        self._raise_if_cancelled(cancel_requested)
         if progress_callback:
             progress_callback(5, "하위 페이지 트리를 확인하는 중입니다.")
         if hasattr(self.confluence_client, "fetch_page_tree"):
             descendants = await self.confluence_client.fetch_page_tree(root_page_id)
         else:
             descendants = await self.confluence_client.fetch_descendant_pages(root_page_id)
+        self._raise_if_cancelled(cancel_requested)
         page_ids = [root_page_id, *[item["id"] for item in descendants if item["id"] != root_page_id]]
         logger.info("bootstrap start space=%s root_page_id=%s pages=%s", space_key, root_page_id, len(page_ids))
         if progress_callback:
@@ -127,6 +137,7 @@ class SyncService:
             mode="bootstrap",
             root_page_id=root_page_id,
             progress_callback=progress_callback,
+            cancel_requested=cancel_requested,
         )
         session = self.session_factory()
         try:
@@ -144,7 +155,9 @@ class SyncService:
         space_key: str,
         now: datetime | None,
         progress_callback: ProgressCallback | None = None,
+        cancel_requested: CancelCallback | None = None,
     ) -> SyncResult:
+        self._raise_if_cancelled(cancel_requested)
         if progress_callback:
             progress_callback(5, "증분 변경 범위를 계산하는 중입니다.")
         timezone = ZoneInfo(self.settings.app_timezone)
@@ -152,6 +165,7 @@ class SyncService:
         start, end = build_day_before_yesterday_window(effective_now)
         cql = build_incremental_cql(space_key, start, end)
         search_results = await self.confluence_client.search_cql(space_key, cql)
+        self._raise_if_cancelled(cancel_requested)
         page_ids = [item["id"] for item in search_results]
         logger.info(
             "incremental start space=%s window=%s ~ %s pages=%s",
@@ -169,6 +183,7 @@ class SyncService:
             root_page_id=None,
             window_label=f"{start.isoformat()} ~ {end.isoformat()}",
             progress_callback=progress_callback,
+            cancel_requested=cancel_requested,
         )
         session = self.session_factory()
         try:
@@ -188,7 +203,9 @@ class SyncService:
         root_page_id: str | None,
         window_label: str | None = None,
         progress_callback: ProgressCallback | None = None,
+        cancel_requested: CancelCallback | None = None,
     ) -> SyncResult:
+        self._raise_if_cancelled(cancel_requested)
         unique_page_ids = list(dict.fromkeys(page_ids))
         slug_lookup = {
             page_id: (space_key, slug)
@@ -196,6 +213,7 @@ class SyncService:
         }
         raw_pages: list[dict] = []
         for page_id in unique_page_ids:
+            self._raise_if_cancelled(cancel_requested)
             raw_page = await self.confluence_client.fetch_page(page_id)
             raw_page["space_key"] = raw_page.get("space_key") or space_key
             existing_slug = slug_lookup.get(raw_page["id"], ("", ""))[1]
@@ -219,6 +237,7 @@ class SyncService:
             page_records: dict[str, Page] = {}
             documents_for_index: list[dict[str, str]] = []
             for index, raw_page in enumerate(raw_pages, start=1):
+                self._raise_if_cancelled(cancel_requested)
                 if progress_callback and raw_pages:
                     progress = 20 + int(((index - 1) / max(len(raw_pages), 1)) * 65)
                     progress_callback(progress, f"{index}/{len(raw_pages)} 페이지를 처리하는 중입니다: {raw_page['title']}")
@@ -264,7 +283,9 @@ class SyncService:
                 body_image_refs = self._extract_body_image_references(markdown_body)
                 downloaded_assets: dict[str, dict[str, str | None]] = {}
                 attachment_links: list[str] = []
+                self._raise_if_cancelled(cancel_requested)
                 for attachment in await self.confluence_client.list_attachments(raw_page["id"]):
+                    self._raise_if_cancelled(cancel_requested)
                     if not attachment.get("download"):
                         continue
                     attachment_filename = self._normalize_attachment_name(attachment["filename"])
@@ -291,6 +312,7 @@ class SyncService:
                             download_path=attachment["download"],
                             confluence_attachment_id=attachment.get("id"),
                             mime_type=mime_type,
+                            cancel_requested=cancel_requested,
                         )
                     except Exception as exc:
                         if not is_missing_attachment_redirect(exc):
@@ -314,6 +336,7 @@ class SyncService:
                     markdown_body=markdown_body,
                     downloaded_assets=downloaded_assets,
                     skipped_attachments=skipped_attachments,
+                    cancel_requested=cancel_requested,
                 )
                 downloaded_assets.update(new_body_assets)
                 processed_assets += len(new_body_assets)
@@ -441,6 +464,7 @@ class SyncService:
             )
             session.execute(delete(PageLink).where(PageLink.source_page_id.in_([page.id for page in page_records.values()])))
             session.flush()
+            self._raise_if_cancelled(cancel_requested)
             if progress_callback:
                 progress_callback(92, "인덱스와 링크를 재구성하는 중입니다.")
 
@@ -489,6 +513,7 @@ class SyncService:
                     edges.append({"source": source_page.id, "target": target_page.id, "link_type": "wiki"})
 
             logger.debug("rebuilding materialized views space=%s", space_key)
+            self._raise_if_cancelled(cancel_requested)
             self._rebuild_materialized_views(session)
             logger.debug("rebuilt materialized views space=%s", space_key)
 
@@ -609,7 +634,9 @@ class SyncService:
         confluence_attachment_id: str | None,
         mime_type: str | None,
         force_image: bool = False,
+        cancel_requested: CancelCallback | None = None,
     ) -> dict[str, str | bool | None]:
+        self._raise_if_cancelled(cancel_requested)
         safe_filename = Path(filename).name or "asset"
         content = await self.confluence_client.download_bytes(download_path)
         asset_root = self.settings.wiki_root / "spaces" / space_key / "assets"
@@ -652,6 +679,7 @@ class SyncService:
         markdown_body: str,
         downloaded_assets: dict[str, dict[str, str | bool | None]],
         skipped_attachments: list[str],
+        cancel_requested: CancelCallback | None = None,
     ) -> tuple[str, set[str], dict[str, dict[str, str | bool | None]]]:
         if not BODY_IMAGE_PLACEHOLDER_RE.search(markdown_body):
             return markdown_body, set(), {}
@@ -664,6 +692,7 @@ class SyncService:
         cursor = 0
 
         for match in BODY_IMAGE_PLACEHOLDER_RE.finditer(markdown_body):
+            self._raise_if_cancelled(cancel_requested)
             rendered_parts.append(markdown_body[cursor : match.start()])
             kind = match.group("kind")
             value = match.group("value").strip()
@@ -693,6 +722,7 @@ class SyncService:
                             confluence_attachment_id=None,
                             mime_type=None,
                             force_image=True,
+                            cancel_requested=cancel_requested,
                         )
                     except ValueError:
                         asset_info = None
@@ -726,6 +756,11 @@ class SyncService:
 
         rendered_parts.append(markdown_body[cursor:])
         return "".join(rendered_parts), inline_image_keys, new_body_assets
+
+    @staticmethod
+    def _raise_if_cancelled(cancel_requested: CancelCallback | None) -> None:
+        if cancel_requested is not None and cancel_requested():
+            raise SyncCancelledError("cancelled by user")
 
     def _rebuild_materialized_views(self, session) -> None:
         grouped_documents: dict[str, list[dict[str, str]]] = {}
