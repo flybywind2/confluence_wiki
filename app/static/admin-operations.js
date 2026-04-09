@@ -1,12 +1,31 @@
 (() => {
   const panel = document.getElementById("admin-sync-jobs");
   const summary = document.getElementById("admin-sync-queue-summary");
+  const currentPanel = document.getElementById("admin-sync-current");
+  const currentTitle = document.getElementById("admin-sync-current-title");
+  const currentStatus = document.getElementById("admin-sync-current-status");
+  const progressFill = document.getElementById("admin-sync-progress-fill");
+  const progressLabel = document.getElementById("admin-sync-progress-label");
+  const eventsList = document.getElementById("admin-sync-events");
   const runningList = document.getElementById("admin-sync-running-list");
   const queuedList = document.getElementById("admin-sync-queued-list");
   const recentList = document.getElementById("admin-sync-recent-list");
   const triggers = Array.from(document.querySelectorAll('[data-admin-sync-trigger="true"]'));
 
-  if (!panel || !summary || !runningList || !queuedList || !recentList || triggers.length === 0) {
+  if (
+    !panel ||
+    !summary ||
+    !currentPanel ||
+    !currentTitle ||
+    !currentStatus ||
+    !progressFill ||
+    !progressLabel ||
+    !eventsList ||
+    !runningList ||
+    !queuedList ||
+    !recentList ||
+    triggers.length === 0
+  ) {
     return;
   }
 
@@ -52,6 +71,38 @@
     }
   };
 
+  const renderCurrentJob = (job) => {
+    if (!job) {
+      currentPanel.hidden = true;
+      progressFill.style.width = "0%";
+      progressLabel.textContent = "0%";
+      currentStatus.textContent = "대기 중입니다.";
+      eventsList.innerHTML = "";
+      return;
+    }
+
+    currentPanel.hidden = false;
+    currentTitle.textContent = job.query || job.space_key || "실행 중인 작업";
+    const progress = Number(job.progress || 0);
+    progressFill.style.width = `${progress}%`;
+    progressLabel.textContent = `${progress}%`;
+    currentStatus.textContent = job.error || job.message || "처리 중입니다.";
+    eventsList.innerHTML = "";
+    for (const event of job.events || []) {
+      const item = document.createElement("li");
+      const headline = document.createElement("strong");
+      headline.textContent = event.message || "";
+      item.appendChild(headline);
+
+      const meta = document.createElement("span");
+      meta.className = "admin-sync-job-meta";
+      const parts = [event.status || "", Number.isFinite(Number(event.progress)) ? `${event.progress}%` : ""];
+      meta.textContent = parts.filter(Boolean).join(" · ");
+      item.appendChild(meta);
+      eventsList.appendChild(item);
+    }
+  };
+
   const hasActiveJobs = (overview) => Boolean(overview?.running || (overview?.queued || []).length);
 
   const renderOverview = (overview) => {
@@ -62,6 +113,7 @@
       ? `실행 중 ${runningCount}건 · 대기 ${queuedCount}건`
       : "현재 대기열이 없습니다.";
 
+    renderCurrentJob(overview?.running || null);
     renderBucket(runningList, overview?.running ? [overview.running] : [], "실행 중인 작업이 없습니다.");
     renderBucket(queuedList, overview?.queued || [], "대기 중인 작업이 없습니다.");
     renderBucket(recentList, overview?.recent || [], "최근 작업이 없습니다.");

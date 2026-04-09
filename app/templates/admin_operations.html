@@ -52,6 +52,20 @@
       <h2>실행 진행 상황</h2>
       <span id="admin-sync-queue-summary">현재 대기열이 없습니다.</span>
     </div>
+    <section class="admin-sync-current" id="admin-sync-current" hidden>
+      <div class="admin-sync-current-head">
+        <div>
+          <div class="eyebrow">Now Running</div>
+          <h3 id="admin-sync-current-title">실행 중인 작업</h3>
+        </div>
+        <strong class="admin-sync-current-progress" id="admin-sync-progress-label">0%</strong>
+      </div>
+      <div class="admin-sync-progress-bar" aria-hidden="true">
+        <span id="admin-sync-progress-fill"></span>
+      </div>
+      <p class="admin-sync-current-status" id="admin-sync-current-status">대기 중입니다.</p>
+      <ul class="admin-sync-events" id="admin-sync-events"></ul>
+    </section>
     <div class="admin-sync-jobs-grid">
       <section class="list-card admin-sync-jobs-card">
         <div class="section-header">

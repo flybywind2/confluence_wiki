@@ -52,6 +52,9 @@ def test_admin_can_open_operations_page(tmp_path, sample_settings_dict):
     assert "증분 동기화 스케줄" in response.text
     assert "외부 스케줄러" in response.text
     assert 'id="admin-sync-jobs"' in response.text
+    assert 'id="admin-sync-current"' in response.text
+    assert 'id="admin-sync-progress-fill"' in response.text
+    assert 'id="admin-sync-events"' in response.text
     assert 'data-admin-sync-trigger="true"' in response.text
 
 
