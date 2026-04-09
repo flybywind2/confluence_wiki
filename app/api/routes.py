@@ -860,6 +860,66 @@ async def index(
         session.close()
 
 
+@router.get("/knowledge-board", response_class=HTMLResponse)
+async def knowledge_board(
+    request: Request,
+    q: str = Query(default=""),
+    kind: str | None = Query(default=None),
+    recent: str | None = Query(default=None),
+) -> HTMLResponse:
+    session = _session_factory(request)()
+    try:
+        auth_result = _ensure_html_role(session, request, "viewer")
+        if isinstance(auth_result, RedirectResponse):
+            return auth_result
+        spaces = _visible_spaces(session)
+        space_name_by_key = _space_name_by_key(spaces)
+        knowledge_query = (
+            select(KnowledgeDocument, Space)
+            .join(Space, Space.id == KnowledgeDocument.space_id)
+            .where(Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY)
+        )
+        knowledge_rows = session.execute(knowledge_query).all()
+        recent_days = _parse_recent_days(recent)
+        submitted_query = str(q or "").strip().lower()
+        board_rows = []
+        for doc, _doc_space in knowledge_rows:
+            if not _is_user_visible_knowledge(doc):
+                continue
+            if not _matches_filters(doc, kind, recent_days):
+                continue
+            haystack = " ".join([str(doc.title or ""), str(doc.slug or ""), str(doc.summary or "")]).lower()
+            if submitted_query and submitted_query not in haystack:
+                continue
+            board_rows.append(
+                {
+                    **_knowledge_result_item(doc, "global", ", ".join(_space_names_for_doc(doc, space_name_by_key))),
+                    "source_space_names": _space_names_for_doc(doc, space_name_by_key),
+                    "source_count": _source_page_count_for_doc(doc),
+                    "summary": (doc.summary or "").strip(),
+                }
+            )
+        board_rows.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
+        return _templates(request).TemplateResponse(
+            request,
+            "knowledge_board.html",
+            _with_sidebar_metrics({
+                "request": request,
+                "spaces": spaces,
+                "space_name_by_key": space_name_by_key,
+                "selected_space": "all",
+                "selected_space_name": "전체 지식",
+                "board_rows": board_rows,
+                "board_query": q,
+                "selected_kind": normalize_knowledge_kind(kind) if kind and kind != "all" else "all",
+                "selected_recent": recent or "all",
+                "meta_description": _meta_description(f"전체 지식 문서 {len(board_rows)}건을 게시판 형태로 조회합니다."),
+            }, session),
+        )
+    finally:
+        session.close()
+
+
 @router.get("/spaces/{space_key}", response_class=HTMLResponse)
 async def space_index(
     request: Request,
@@ -944,6 +1004,11 @@ async def knowledge_view(request: Request, kind: str, slug: str, space: str | No
                 ),
                 "regenerate_selected_space": "" if (space or "all") == "all" else (space or ""),
                 "regenerate_kind": normalized_kind,
+                "delete_href": (
+                    f"/knowledge/{knowledge_segment(normalized_kind)}/{quote(slug)}/delete"
+                    if role_allows(auth_result.role, "admin")
+                    else None
+                ),
                 "source_links": source_links,
                 "meta_description": _meta_description(doc.summary or display_title),
             }, session),
@@ -1383,6 +1448,28 @@ async def knowledge_regenerate(
     return RedirectResponse(url=result["href"], status_code=303)
 
 
+@router.post("/knowledge/{kind}/{slug}/delete")
+async def knowledge_delete(
+    request: Request,
+    kind: str,
+    slug: str,
+    selected_space: str = Form(default=""),
+) -> RedirectResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+        result = KnowledgeService(_settings(request)).delete_document(
+            kind=kind,
+            slug=slug,
+            selected_space=selected_space or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        session.close()
+    return RedirectResponse(url=result["href"], status_code=303)
+
+
 @router.get("/spaces/{space_key}/knowledge/{kind}/{slug}/edit")
 async def knowledge_edit_form_legacy(space_key: str, kind: str, slug: str) -> RedirectResponse:
     return RedirectResponse(url=f"/knowledge/{knowledge_segment(kind)}/{slug}/edit?space={space_key}", status_code=307)
@@ -1425,6 +1512,28 @@ async def knowledge_regenerate_legacy(
     try:
         _ensure_api_role(session, request, "editor")
         result = KnowledgeService(_settings(request)).regenerate_document(
+            kind=kind,
+            slug=slug,
+            selected_space=space_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        session.close()
+    return RedirectResponse(url=result["href"], status_code=303)
+
+
+@router.post("/spaces/{space_key}/knowledge/{kind}/{slug}/delete")
+async def knowledge_delete_legacy(
+    request: Request,
+    space_key: str,
+    kind: str,
+    slug: str,
+) -> RedirectResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+        result = KnowledgeService(_settings(request)).delete_document(
             kind=kind,
             slug=slug,
             selected_space=space_key,

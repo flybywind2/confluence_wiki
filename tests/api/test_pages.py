@@ -34,6 +34,7 @@ def test_index_page_hides_space_selector_and_document_kind_filter():
     assert '<div class="sidebar-title">Space</div>' not in response.text
     assert ">문서 유형<" not in response.text
     assert "위키에게 묻기" in response.text
+    assert 'href="/knowledge-board"' in response.text
 
 
 def test_sidebar_shows_reference_metrics(tmp_path, sample_settings_dict):
@@ -173,6 +174,25 @@ def test_search_page_shows_empty_state_for_no_results(tmp_path, sample_settings_
 
     assert response.status_code == 200
     assert "검색 결과가 없습니다." in response.text
+
+
+def test_knowledge_board_renders_table_and_filters(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
+    response = client.get("/knowledge-board?q=운영&kind=keyword&recent=30d")
+
+    assert response.status_code == 200
+    assert "전체 지식 게시판" in response.text
+    assert '<table class="knowledge-board-table">' in response.text
+    assert "운영 대시보드" in response.text
+    assert "키워드 문서" in response.text
+    assert "참조 공간" in response.text
+    assert "원문 수" in response.text
 
 
 def test_page_view_renders_breadcrumb_and_meta_description(tmp_path, sample_settings_dict):
@@ -334,6 +354,66 @@ def test_generated_knowledge_page_shows_regenerate_action(tmp_path, sample_setti
     assert 'data-queue-regenerate="true"' in response.text
     assert 'data-regenerate-kind="keyword"' in response.text
     assert 'data-regenerate-slug="운영-대시보드"' in response.text
+
+
+def test_admin_sees_delete_action_but_editor_does_not(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    editor_client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(editor_client, "editor")
+    editor_response = editor_client.get("/knowledge/keywords/운영-대시보드")
+
+    assert editor_response.status_code == 200
+    assert "/knowledge/keywords/%EC%9A%B4%EC%98%81-%EB%8C%80%EC%8B%9C%EB%B3%B4%EB%93%9C/delete" not in editor_response.text
+    assert "지식 삭제" not in editor_response.text
+
+    admin_client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(admin_client, "admin")
+    admin_response = admin_client.get("/knowledge/keywords/운영-대시보드")
+
+    assert admin_response.status_code == 200
+    assert 'action="/knowledge/keywords/%EC%9A%B4%EC%98%81-%EB%8C%80%EC%8B%9C%EB%B3%B4%EB%93%9C/delete"' in admin_response.text
+    assert "지식 삭제" in admin_response.text
+
+
+def test_admin_can_delete_knowledge_document(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "admin")
+
+    response = client.post(
+        "/knowledge/keywords/운영-대시보드/delete",
+        data={"selected_space": "all"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
+
+    deleted = client.get("/knowledge/keywords/운영-대시보드")
+    assert deleted.status_code == 404
+
+    keyword_file = tmp_path / "wiki" / "global" / "knowledge" / "keywords" / "운영-대시보드.md"
+    assert not keyword_file.exists()
+
+    session = create_session_factory(settings.database_url)()
+    try:
+        doc = session.scalar(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.kind == "keyword",
+                KnowledgeDocument.slug == "운영-대시보드",
+            )
+        )
+        assert doc is None
+    finally:
+        session.close()
 
 
 def test_analysis_knowledge_page_shows_llm_regenerate_action(tmp_path, sample_settings_dict):

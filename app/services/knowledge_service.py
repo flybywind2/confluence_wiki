@@ -891,6 +891,66 @@ class KnowledgeService:
         finally:
             session.close()
 
+    def delete_document(self, *, kind: str, slug: str, selected_space: str | None = None) -> dict[str, str]:
+        session = self.session_factory()
+        try:
+            result = self.delete_document_with_session(session, kind=kind, slug=slug, selected_space=selected_space)
+            session.commit()
+            return result
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def delete_document_with_session(
+        self,
+        session,
+        *,
+        kind: str,
+        slug: str,
+        selected_space: str | None = None,
+    ) -> dict[str, str]:
+        normalized_kind = normalize_knowledge_kind(kind)
+        if normalized_kind not in {"entity", "keyword", "analysis", "query", "lint"}:
+            raise ValueError("deletion is only allowed for user-visible knowledge documents")
+
+        global_space = ensure_global_knowledge_space(session)
+        doc = session.scalar(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.space_id == global_space.id,
+                KnowledgeDocument.kind == normalized_kind,
+                KnowledgeDocument.slug == slug,
+            )
+        )
+        if doc is None:
+            doc = session.scalar(
+                select(KnowledgeDocument).where(
+                    KnowledgeDocument.kind == normalized_kind,
+                    KnowledgeDocument.slug == slug,
+                )
+            )
+        if doc is None:
+            raise ValueError("knowledge document not found")
+
+        deleted_title = doc.title
+        deleted_slug = doc.slug
+        deleted_kind = doc.kind
+        markdown_path = self.settings.wiki_root / doc.markdown_path
+        if markdown_path.exists():
+            markdown_path.unlink(missing_ok=True)
+        session.delete(doc)
+        session.flush()
+        self._rebuild_indexes_for_space(session, global_space)
+        append_space_log(
+            self.settings.wiki_root,
+            selected_space or "GLOBAL",
+            "knowledge-delete",
+            datetime.now(),
+            [{"title": deleted_title, "slug": deleted_slug, "kind": deleted_kind, "href": "/"}],
+        )
+        return {"kind": deleted_kind, "slug": deleted_slug, "title": deleted_title, "href": "/"}
+
     def regenerate_document_with_session(
         self,
         session,

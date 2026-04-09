@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}전체 지식 게시판{% endblock %}
+{% block content %}
+<section class="hero-card knowledge-board-hero">
+  <div>
+    <span class="eyebrow">Knowledge Board</span>
+    <h1>전체 지식 게시판</h1>
+    <p>전체 knowledge 문서를 게시판 형태로 조회하고, 최근 갱신과 참조 범위를 한 번에 확인합니다.</p>
+  </div>
+</section>
+
+<section class="list-card facet-card">
+  <form class="facet-form knowledge-board-filter" action="/knowledge-board" method="get">
+    <label>
+      <span>검색어</span>
+      <input type="text" name="q" value="{{ board_query or '' }}" placeholder="지식 제목, slug, 요약 검색" />
+    </label>
+    <label>
+      <span>유형</span>
+      <select name="kind">
+        <option value="all" {% if selected_kind == 'all' %}selected{% endif %}>전체</option>
+        <option value="keyword" {% if selected_kind == 'keyword' %}selected{% endif %}>키워드 문서</option>
+        <option value="query" {% if selected_kind == 'query' %}selected{% endif %}>검색 위키</option>
+        <option value="analysis" {% if selected_kind == 'analysis' %}selected{% endif %}>분석 문서</option>
+        <option value="lint" {% if selected_kind == 'lint' %}selected{% endif %}>Lint Report</option>
+      </select>
+    </label>
+    <label>
+      <span>최근 변경</span>
+      <select name="recent">
+        <option value="all" {% if selected_recent == 'all' %}selected{% endif %}>전체</option>
+        <option value="7d" {% if selected_recent == '7d' %}selected{% endif %}>최근 7일</option>
+        <option value="30d" {% if selected_recent == '30d' %}selected{% endif %}>최근 30일</option>
+      </select>
+    </label>
+    <button type="submit">조회</button>
+  </form>
+</section>
+
+<section class="list-card knowledge-board-card">
+  <div class="section-header">
+    <h2>지식 문서</h2>
+    <span>{{ board_rows|length }}건</span>
+  </div>
+  {% if board_rows %}
+  <div class="knowledge-board-table-wrap">
+    <table class="knowledge-board-table">
+      <thead>
+        <tr>
+          <th>제목</th>
+          <th>유형</th>
+          <th>참조 공간</th>
+          <th>원문 수</th>
+          <th>마지막 갱신</th>
+          <th>요약</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in board_rows %}
+        <tr>
+          <td><a href="{{ row.href }}">{{ row.title }}</a></td>
+          <td>{{ row.kind_label }}</td>
+          <td>{{ row.source_space_names | join(', ') }}</td>
+          <td>{{ row.source_count }}</td>
+          <td>{{ row.updated_at_label }}</td>
+          <td>{{ row.summary or '-' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty-state">조건에 맞는 지식 문서가 없습니다.</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -60,6 +60,16 @@
           <button class="source-link source-button" type="submit">{{ regenerate_label or '다시 생성' }}</button>
         </form>
         {% endif %}
+        {% if delete_href %}
+        <form class="page-action-form" action="{{ delete_href }}" method="post">
+          <input type="hidden" name="selected_space" value="{{ regenerate_selected_space or '' }}">
+          <button
+            class="source-link source-button source-link-danger"
+            type="submit"
+            onclick="return confirm('이 지식 문서를 삭제하시겠습니까?');"
+          >지식 삭제</button>
+        </form>
+        {% endif %}
         {% if history_href %}
         <a class="source-link" href="{{ history_href }}">문서 이력</a>
         {% endif %}
