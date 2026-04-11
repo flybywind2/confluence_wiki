@@ -12,9 +12,13 @@ from app.core.config import get_settings
 from app.db.base import Base
 
 
+def is_sqlite_database_url(database_url: str) -> bool:
+    return database_url.startswith("sqlite")
+
+
 @lru_cache(maxsize=8)
 def create_engine_for_url(database_url: str) -> Engine:
-    is_sqlite = database_url.startswith("sqlite")
+    is_sqlite = is_sqlite_database_url(database_url)
     if database_url.startswith("sqlite:///") and not database_url.endswith(":memory:"):
         database_path = Path(database_url.removeprefix("sqlite:///"))
         database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -27,9 +31,27 @@ def create_engine_for_url(database_url: str) -> Engine:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA temp_store=MEMORY")
+            cursor.execute("PRAGMA wal_autocheckpoint=1000")
             cursor.close()
     Base.metadata.create_all(engine)
     return engine
+
+
+def run_sqlite_maintenance_for_url(database_url: str) -> None:
+    if not is_sqlite_database_url(database_url):
+        return
+    engine = create_engine_for_url(database_url)
+    raw_connection = engine.raw_connection()
+    try:
+        cursor = raw_connection.cursor()
+        cursor.execute("PRAGMA optimize")
+        cursor.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        cursor.close()
+        raw_connection.commit()
+    finally:
+        raw_connection.close()
 
 
 @lru_cache(maxsize=8)

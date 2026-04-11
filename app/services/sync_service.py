@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,7 +22,7 @@ from app.core.obsidian import asset_target, page_link
 from app.core.markdown import extract_wiki_links, resolve_page_placeholders
 from app.core.slugs import page_slug
 from app.db.models import Asset, KnowledgeDocument, Page, PageLink, PageVersion, Space, SyncRun, WikiDocument
-from app.db.session import create_session_factory
+from app.db.session import create_session_factory, run_sqlite_maintenance_for_url
 from app.graph.builder import build_graph_payload, build_knowledge_graph_payload, write_graph_cache, write_named_graph_cache
 from app.llm.text_client import TextLLMClient
 from app.llm.vision_client import VisionClient
@@ -33,6 +34,7 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.lint_service import LintService
 from app.services.space_registry import ensure_global_knowledge_space, upsert_space
 from app.services.sync_window import build_day_before_yesterday_window
+from app.services.sync_lease import SyncLeaseHandle, SyncLeaseService
 from app.services.wiki_writer import write_history_markdown, write_page_markdown
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,7 @@ class SyncService:
         self.vision_client = vision_client
         self.text_client = text_client
         self.session_factory = create_session_factory(self.settings.database_url)
+        self.sync_lease_service = SyncLeaseService(self.settings)
         self.settings.wiki_root.mkdir(parents=True, exist_ok=True)
         self.settings.cache_root.mkdir(parents=True, exist_ok=True)
 
@@ -97,9 +100,25 @@ class SyncService:
         progress_callback: ProgressCallback | None = None,
         cancel_requested: CancelCallback | None = None,
     ) -> SyncResult:
-        if progress_callback is None:
-            return await self._run_bootstrap(space_key, root_page_id, cancel_requested=cancel_requested)
-        return await self._run_bootstrap(space_key, root_page_id, progress_callback, cancel_requested)
+        lease_handle = self._acquire_sync_lease(mode="bootstrap", space_key=space_key)
+        try:
+            if progress_callback is None:
+                result = await self._run_bootstrap(
+                    space_key,
+                    root_page_id,
+                    cancel_requested=cancel_requested,
+                )
+            else:
+                result = await self._run_bootstrap(
+                    space_key,
+                    root_page_id,
+                    progress_callback,
+                    cancel_requested,
+                )
+            self._run_post_sync_sqlite_maintenance()
+            return result
+        finally:
+            self._release_sync_lease(lease_handle)
 
     async def run_incremental_async(
         self,
@@ -108,9 +127,25 @@ class SyncService:
         progress_callback: ProgressCallback | None = None,
         cancel_requested: CancelCallback | None = None,
     ) -> SyncResult:
-        if progress_callback is None:
-            return await self._run_incremental(space_key, now, cancel_requested=cancel_requested)
-        return await self._run_incremental(space_key, now, progress_callback, cancel_requested)
+        lease_handle = self._acquire_sync_lease(mode="incremental", space_key=space_key)
+        try:
+            if progress_callback is None:
+                result = await self._run_incremental(
+                    space_key,
+                    now,
+                    cancel_requested=cancel_requested,
+                )
+            else:
+                result = await self._run_incremental(
+                    space_key,
+                    now,
+                    progress_callback,
+                    cancel_requested,
+                )
+            self._run_post_sync_sqlite_maintenance()
+            return result
+        finally:
+            self._release_sync_lease(lease_handle)
 
     async def _run_bootstrap(
         self,
@@ -120,8 +155,7 @@ class SyncService:
         cancel_requested: CancelCallback | None = None,
     ) -> SyncResult:
         self._raise_if_cancelled(cancel_requested)
-        if progress_callback:
-            progress_callback(5, "하위 페이지 트리를 확인하는 중입니다.")
+        self._emit_progress(progress_callback, 5, "하위 페이지 트리를 확인하는 중입니다.")
         if hasattr(self.confluence_client, "fetch_page_tree"):
             descendants = await self.confluence_client.fetch_page_tree(root_page_id)
         else:
@@ -129,8 +163,7 @@ class SyncService:
         self._raise_if_cancelled(cancel_requested)
         page_ids = [root_page_id, *[item["id"] for item in descendants if item["id"] != root_page_id]]
         logger.info("bootstrap start space=%s root_page_id=%s pages=%s", space_key, root_page_id, len(page_ids))
-        if progress_callback:
-            progress_callback(15, f"Bootstrap 대상 {len(page_ids)}건을 확인했습니다.")
+        self._emit_progress(progress_callback, 15, f"Bootstrap 대상 {len(page_ids)}건을 확인했습니다.")
         result = await self._sync_pages(
             space_key=space_key,
             page_ids=page_ids,
@@ -158,8 +191,7 @@ class SyncService:
         cancel_requested: CancelCallback | None = None,
     ) -> SyncResult:
         self._raise_if_cancelled(cancel_requested)
-        if progress_callback:
-            progress_callback(5, "증분 변경 범위를 계산하는 중입니다.")
+        self._emit_progress(progress_callback, 5, "증분 변경 범위를 계산하는 중입니다.")
         timezone = ZoneInfo(self.settings.app_timezone)
         effective_now = now or datetime.now(tz=timezone)
         start, end = build_day_before_yesterday_window(effective_now)
@@ -174,8 +206,7 @@ class SyncService:
             end.isoformat(),
             len(page_ids),
         )
-        if progress_callback:
-            progress_callback(15, f"증분 대상 {len(page_ids)}건을 확인했습니다.")
+        self._emit_progress(progress_callback, 15, f"증분 대상 {len(page_ids)}건을 확인했습니다.")
         result = await self._sync_pages(
             space_key=space_key,
             page_ids=page_ids,
@@ -238,9 +269,13 @@ class SyncService:
             documents_for_index: list[dict[str, str]] = []
             for index, raw_page in enumerate(raw_pages, start=1):
                 self._raise_if_cancelled(cancel_requested)
-                if progress_callback and raw_pages:
+                if raw_pages:
                     progress = 20 + int(((index - 1) / max(len(raw_pages), 1)) * 65)
-                    progress_callback(progress, f"{index}/{len(raw_pages)} 페이지를 처리하는 중입니다: {raw_page['title']}")
+                    self._emit_progress(
+                        progress_callback,
+                        progress,
+                        f"{index}/{len(raw_pages)} 페이지를 처리하는 중입니다: {raw_page['title']}",
+                    )
                 logger.info(
                     "processing page %s/%s id=%s title=%s",
                     index,
@@ -465,8 +500,7 @@ class SyncService:
             session.execute(delete(PageLink).where(PageLink.source_page_id.in_([page.id for page in page_records.values()])))
             session.flush()
             self._raise_if_cancelled(cancel_requested)
-            if progress_callback:
-                progress_callback(92, "인덱스와 링크를 재구성하는 중입니다.")
+            self._emit_progress(progress_callback, 92, "인덱스와 링크를 재구성하는 중입니다.")
 
             edges: list[dict] = []
             known_pages_by_confluence_id = {
@@ -522,8 +556,7 @@ class SyncService:
             sync_run.processed_assets = processed_assets
             sync_run.finished_at = self._utcnow()
             session.commit()
-            if progress_callback:
-                progress_callback(100, "동기화가 완료되었습니다.")
+            self._emit_progress(progress_callback, 100, "동기화가 완료되었습니다.")
             logger.info(
                 "sync complete mode=%s space=%s pages=%s assets=%s",
                 mode,
@@ -761,6 +794,33 @@ class SyncService:
     def _raise_if_cancelled(cancel_requested: CancelCallback | None) -> None:
         if cancel_requested is not None and cancel_requested():
             raise SyncCancelledError("cancelled by user")
+
+    def _acquire_sync_lease(self, *, mode: str, space_key: str) -> SyncLeaseHandle:
+        return self.sync_lease_service.acquire(
+            holder_kind=mode,
+            holder_scope=f"{space_key}:{uuid.uuid4().hex[:8]}",
+            ttl_seconds=21600,
+        )
+
+    def _release_sync_lease(self, lease_handle: SyncLeaseHandle | None) -> None:
+        if lease_handle is None:
+            return
+        self.sync_lease_service.release(lease_handle)
+
+    def _emit_progress(
+        self,
+        progress_callback: ProgressCallback | None,
+        progress: int,
+        message: str,
+    ) -> None:
+        if progress_callback is not None:
+            progress_callback(progress, message)
+
+    def _run_post_sync_sqlite_maintenance(self) -> None:
+        try:
+            run_sqlite_maintenance_for_url(self.settings.database_url)
+        except Exception:
+            logger.warning("sqlite maintenance failed", exc_info=True)
 
     def _rebuild_materialized_views(self, session) -> None:
         grouped_documents: dict[str, list[dict[str, str]]] = {}

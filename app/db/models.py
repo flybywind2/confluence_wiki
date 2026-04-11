@@ -152,6 +152,19 @@ class SyncSchedule(Base):
     space: Mapped[Space] = relationship(back_populates="sync_schedules")
 
 
+class SyncLease(Base):
+    __tablename__ = "sync_leases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lock_name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    owner_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    holder_kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    holder_scope: Mapped[str] = mapped_column(String(255), nullable=False)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class WikiDocument(Base):
     __tablename__ = "wiki_documents"
 

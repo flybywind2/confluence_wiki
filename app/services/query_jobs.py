@@ -11,6 +11,7 @@ from app.core.config import Settings
 from app.db.session import create_session_factory
 from app.services.knowledge_service import KnowledgeService
 from app.services.schedule_service import ScheduleService
+from app.services.sync_lease import SyncLeaseConflictError
 from app.services.sync_service import SyncCancelledError, SyncService
 
 ProgressCallback = Callable[[int, str], None]
@@ -372,6 +373,21 @@ class QueryJobManager:
                 progress=max(job.progress, 1),
                 message="사용자가 작업을 취소했습니다.",
                 error=None,
+            )
+            return
+        except SyncLeaseConflictError as exc:
+            if not is_bootstrap:
+                self._record_incremental_schedule_result(
+                    space_key=str(job.space_key or ""),
+                    status="failed",
+                    error=str(exc),
+                )
+            self._update(
+                job.id,
+                status="failed",
+                progress=max(job.progress, 1),
+                message="다른 동기화 작업이 이미 실행 중입니다.",
+                error=str(exc),
             )
             return
         except Exception as exc:
