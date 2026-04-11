@@ -13,12 +13,12 @@
       <div class="graph-legend-title">노드 범례</div>
       <div class="legend legend-nodes">
         {% if selected_view == 'knowledge' %}
-        <span><i class="legend-node keyword"></i>키워드 문서</span>
-        <span><i class="legend-node query"></i>검색 위키</span>
-        <span><i class="legend-node analysis"></i>분석 문서</span>
-        <span><i class="legend-node page"></i>원문 페이지</span>
+        <button type="button" class="legend-toggle" data-legend-group="node" data-legend-key="keyword" aria-pressed="true"><i class="legend-node keyword"></i>키워드 문서</button>
+        <button type="button" class="legend-toggle" data-legend-group="node" data-legend-key="query" aria-pressed="true"><i class="legend-node query"></i>검색 위키</button>
+        <button type="button" class="legend-toggle" data-legend-group="node" data-legend-key="analysis" aria-pressed="true"><i class="legend-node analysis"></i>분석 문서</button>
+        <button type="button" class="legend-toggle" data-legend-group="node" data-legend-key="page" aria-pressed="true"><i class="legend-node page"></i>원문 페이지</button>
         {% else %}
-        <span><i class="legend-node page"></i>원문 페이지</span>
+        <button type="button" class="legend-toggle" data-legend-group="node" data-legend-key="page" aria-pressed="true"><i class="legend-node page"></i>원문 페이지</button>
         {% endif %}
       </div>
     </div>
@@ -26,12 +26,12 @@
       <div class="graph-legend-title">링크 범례</div>
       <div class="legend legend-links">
         {% if selected_view == 'knowledge' %}
-        <span><i class="legend-line keyword-source"></i>Keyword Source</span>
-        <span><i class="legend-line keyword-related"></i>Keyword Related</span>
-        <span><i class="legend-line analysis-keyword"></i>Analysis Link</span>
+        <button type="button" class="legend-toggle" data-legend-group="edge" data-legend-key="keyword-source" aria-pressed="true"><i class="legend-line keyword-source"></i>Keyword Source</button>
+        <button type="button" class="legend-toggle" data-legend-group="edge" data-legend-key="keyword-related" aria-pressed="true"><i class="legend-line keyword-related"></i>Keyword Related</button>
+        <button type="button" class="legend-toggle" data-legend-group="edge" data-legend-key="analysis-keyword" aria-pressed="true"><i class="legend-line analysis-keyword"></i>Analysis Link</button>
         {% else %}
-        <span><i class="legend-line hierarchy"></i>Hierarchy</span>
-        <span><i class="legend-line wiki"></i>Wiki Link</span>
+        <button type="button" class="legend-toggle" data-legend-group="edge" data-legend-key="hierarchy" aria-pressed="true"><i class="legend-line hierarchy"></i>Hierarchy</button>
+        <button type="button" class="legend-toggle" data-legend-group="edge" data-legend-key="wiki" aria-pressed="true"><i class="legend-line wiki"></i>Wiki Link</button>
         {% endif %}
       </div>
     </div>

@@ -390,9 +390,16 @@ def test_graph_page_renders_navigation_controls_and_scope_selector_without_synth
     assert "검색 위키" in response.text
     assert "분석 문서" in response.text
     assert "원문 페이지" in response.text
+    assert 'class="legend-toggle"' in response.text
+    assert 'data-legend-group="node"' in response.text
+    assert 'data-legend-key="keyword"' in response.text
+    assert 'data-legend-key="page"' in response.text
     assert "링크 범례" in response.text
     assert "Keyword Source" in response.text
     assert "Keyword Related" in response.text
+    assert 'data-legend-group="edge"' in response.text
+    assert 'data-legend-key="keyword-source"' in response.text
+    assert 'data-legend-key="analysis-keyword"' in response.text
     assert "Synthesis" not in response.text
 
 

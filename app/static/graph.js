@@ -14,6 +14,9 @@
   const zoomInButton = document.getElementById("graph-zoom-in");
   const zoomOutButton = document.getElementById("graph-zoom-out");
   const viewResetButton = document.getElementById("graph-view-reset");
+  const legendButtons = Array.from(document.querySelectorAll(".legend-toggle"));
+  const visibleNodeKinds = new Set(legendButtons.filter(button => button.dataset.legendGroup === "node").map(button => button.dataset.legendKey));
+  const visibleEdgeTypes = new Set(legendButtons.filter(button => button.dataset.legendGroup === "edge").map(button => button.dataset.legendKey));
 
   const width = container.clientWidth || 900;
   const height = container.clientHeight || 640;
@@ -24,6 +27,7 @@
   const viewport = svg.append("g").attr("class", "graph-viewport");
   const initialPositions = new Map();
   let initialLayoutCaptured = false;
+  const nodesById = new Map(payload.nodes.map(item => [item.id, item]));
 
   const simulation = d3.forceSimulation(payload.nodes)
     .force("link", d3.forceLink(payload.edges).id(d => d.id).distance(d => {
@@ -103,6 +107,21 @@
     node.attr("transform", d => `translate(${d.x},${d.y})`);
   };
 
+  const resolveNode = (item) => typeof item === "string" ? nodesById.get(item) : item;
+  const isNodeVisible = (item) => {
+    const resolved = resolveNode(item);
+    return !!resolved && visibleNodeKinds.has(resolved.kind || "page");
+  };
+  const isEdgeVisible = (item) => {
+    if (!visibleEdgeTypes.has(item.type)) return false;
+    return isNodeVisible(item.source) && isNodeVisible(item.target);
+  };
+
+  const applyLegendFilters = () => {
+    node.attr("display", d => isNodeVisible(d) ? null : "none");
+    link.attr("display", d => isEdgeVisible(d) ? null : "none");
+  };
+
   simulation.on("tick", render);
   simulation.on("end", () => {
     if (initialLayoutCaptured) return;
@@ -155,4 +174,22 @@
       svg.transition().duration(180).call(zoom.scaleBy, 1 / 1.2);
     });
   }
+
+  legendButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const group = button.dataset.legendGroup;
+      const key = button.dataset.legendKey;
+      const targetSet = group === "edge" ? visibleEdgeTypes : visibleNodeKinds;
+      if (targetSet.has(key)) {
+        targetSet.delete(key);
+        button.setAttribute("aria-pressed", "false");
+      } else {
+        targetSet.add(key);
+        button.setAttribute("aria-pressed", "true");
+      }
+      applyLegendFilters();
+    });
+  });
+
+  applyLegendFilters();
 })();
