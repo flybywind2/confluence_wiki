@@ -22,6 +22,7 @@ dependencies = [
   "python-multipart>=0.0.20",
   "python-slugify>=8.0.0",
   "pyyaml>=6.0.0",
+  "selectolax>=0.4.7",
   "sqlalchemy>=2.0.0",
   "tzdata>=2024.1",
   "uvicorn>=0.35.0",
