@@ -80,6 +80,13 @@ class RejectingExternalImageConfluenceClient(FakeConfluenceClient):
         return await super().download_bytes(download_path)
 
 
+class FailsOnSecondPageAttachmentsConfluenceClient(FakeConfluenceClient):
+    async def list_attachments(self, page_id: str):
+        if page_id == "200":
+            raise RuntimeError("second page attachment lookup failed")
+        return await super().list_attachments(page_id)
+
+
 class MissingAttachmentRedirectConfluenceClient(FakeConfluenceClient):
     async def download_bytes(self, download_path: str):
         request = httpx.Request("GET", f"https://mirror.example.com{download_path}")
@@ -190,6 +197,49 @@ def test_incremental_sync_rebuilds_indexes_from_existing_db_state(tmp_path, samp
 
     assert "child-page-200" in index_text
     assert "child-page-200" in graph_text
+
+
+def test_incremental_sync_commits_each_processed_page_before_later_failure(tmp_path, sample_settings_dict):
+    from app.core.config import Settings
+    from app.db.models import SyncRun
+
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+
+    service = SyncService(
+        settings=settings,
+        confluence_client=FailsOnSecondPageAttachmentsConfluenceClient(
+            search_ids=["100", "200"],
+            body_overrides={
+                "100": "<h1>첫번째 문서</h1><p>정상 반영되어야 합니다.</p>",
+                "200": "<h1>두번째 문서</h1><p>여기서 실패합니다.</p>",
+            },
+        ),
+        vision_client=FakeVisionClient(),
+    )
+
+    with pytest.raises(RuntimeError, match="second page attachment lookup failed"):
+        service.run_incremental(space_key="DEMO")
+
+    session = service.session_factory()
+    try:
+        first_page = session.scalar(select(Page).where(Page.confluence_page_id == "100"))
+        second_page = session.scalar(select(Page).where(Page.confluence_page_id == "200"))
+        first_doc = session.scalar(
+            select(WikiDocument).join(Page).where(Page.confluence_page_id == "100")
+        )
+        sync_run = session.scalar(select(SyncRun).order_by(SyncRun.id.desc()))
+    finally:
+        session.close()
+
+    assert first_page is not None
+    assert second_page is None
+    assert first_doc is not None
+    assert (tmp_path / "wiki" / "spaces" / "DEMO" / "pages" / "root-page-100.md").exists()
+    assert sync_run is not None
+    assert sync_run.status == "failed"
+    assert sync_run.processed_pages == 1
 
 
 def test_incremental_sync_fetches_remote_pages_before_opening_write_session(tmp_path, sample_settings_dict):

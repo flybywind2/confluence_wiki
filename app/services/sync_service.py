@@ -255,15 +255,16 @@ class SyncService:
         session = self.session_factory()
         processed_assets = 0
         skipped_attachments: list[str] = []
+        sync_run_id: int | None = None
+        committed_page_count = 0
         try:
             logger.info("sync start mode=%s space=%s pages=%s", mode, space_key, len(unique_page_ids))
             space = upsert_space(session, space_key=space_key, root_page_id=root_page_id)
             sync_run = SyncRun(mode=mode, space_id=space.id, status="running")
             session.add(sync_run)
             session.flush()
-
-            existing_pages = session.scalars(select(Page).where(Page.space_id == space.id)).all()
-            existing_pages_by_confluence_id = {page.confluence_page_id: page for page in existing_pages}
+            sync_run_id = sync_run.id
+            session.commit()
 
             page_records: dict[str, Page] = {}
             documents_for_index: list[dict[str, str]] = []
@@ -311,7 +312,6 @@ class SyncService:
 
                 page_record.updated_at_remote = self._parse_datetime(raw_page.get("updated_at"))
                 page_record.last_synced_at = self._utcnow()
-                page_records[raw_page["id"]] = page_record
 
                 session.execute(delete(Asset).where(Asset.page_id == page_record.id))
 
@@ -473,15 +473,19 @@ class SyncService:
                     wiki_document.summary = summary
                     wiki_document.index_line = f"- {page_link(space_key, raw_page['slug'], raw_page['title'])}"
 
-                documents_for_index.append(
-                    {
-                        "title": raw_page["title"],
-                        "slug": raw_page["slug"],
-                        "updated_at": raw_page.get("updated_at") or "",
-                        "summary": summary,
-                        "href": f"/spaces/{space_key}/pages/{raw_page['slug']}",
-                    }
-                )
+                page_document = {
+                    "title": raw_page["title"],
+                    "slug": raw_page["slug"],
+                    "updated_at": raw_page.get("updated_at") or "",
+                    "summary": summary,
+                    "href": f"/spaces/{space_key}/pages/{raw_page['slug']}",
+                }
+                sync_run.processed_pages = index
+                sync_run.processed_assets = processed_assets
+                session.commit()
+                page_records[raw_page["id"]] = page_record
+                documents_for_index.append(page_document)
+                committed_page_count = index
                 logger.info(
                     "processed page id=%s assets=%s summary=%s",
                     raw_page["id"],
@@ -552,7 +556,7 @@ class SyncService:
             logger.debug("rebuilt materialized views space=%s", space_key)
 
             sync_run.status = "success"
-            sync_run.processed_pages = len(raw_pages)
+            sync_run.processed_pages = committed_page_count
             sync_run.processed_assets = processed_assets
             sync_run.finished_at = self._utcnow()
             session.commit()
@@ -572,8 +576,28 @@ class SyncService:
                 processed_assets=processed_assets,
                 skipped_attachments=skipped_attachments,
             )
-        except Exception:
+        except SyncCancelledError as exc:
             session.rollback()
+            if sync_run_id is not None:
+                self._finalize_sync_run(
+                    sync_run_id=sync_run_id,
+                    status="cancelled",
+                    processed_pages=committed_page_count,
+                    processed_assets=processed_assets,
+                    error_message=str(exc),
+                )
+            logger.info("sync cancelled mode=%s space=%s processed_pages=%s", mode, space_key, committed_page_count)
+            raise
+        except Exception as exc:
+            session.rollback()
+            if sync_run_id is not None:
+                self._finalize_sync_run(
+                    sync_run_id=sync_run_id,
+                    status="failed",
+                    processed_pages=committed_page_count,
+                    processed_assets=processed_assets,
+                    error_message=str(exc),
+                )
             logger.exception("sync failed mode=%s space=%s", mode, space_key)
             raise
         finally:
@@ -821,6 +845,29 @@ class SyncService:
             run_sqlite_maintenance_for_url(self.settings.database_url)
         except Exception:
             logger.warning("sqlite maintenance failed", exc_info=True)
+
+    def _finalize_sync_run(
+        self,
+        *,
+        sync_run_id: int,
+        status: str,
+        processed_pages: int,
+        processed_assets: int,
+        error_message: str | None = None,
+    ) -> None:
+        session = self.session_factory()
+        try:
+            sync_run = session.get(SyncRun, sync_run_id)
+            if sync_run is None:
+                return
+            sync_run.status = status
+            sync_run.processed_pages = processed_pages
+            sync_run.processed_assets = processed_assets
+            sync_run.finished_at = self._utcnow()
+            sync_run.error_message = error_message
+            session.commit()
+        finally:
+            session.close()
 
     def _rebuild_materialized_views(self, session) -> None:
         grouped_documents: dict[str, list[dict[str, str]]] = {}
