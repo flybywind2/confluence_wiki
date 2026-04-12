@@ -80,6 +80,7 @@ class SyncService:
         self.text_client = text_client
         self.session_factory = create_session_factory(self.settings.database_url)
         self.sync_lease_service = SyncLeaseService(self.settings)
+        self._active_sync_lease: SyncLeaseHandle | None = None
         self.settings.wiki_root.mkdir(parents=True, exist_ok=True)
         self.settings.cache_root.mkdir(parents=True, exist_ok=True)
 
@@ -101,7 +102,9 @@ class SyncService:
         cancel_requested: CancelCallback | None = None,
     ) -> SyncResult:
         lease_handle = self._acquire_sync_lease(mode="bootstrap", space_key=space_key)
+        self._active_sync_lease = lease_handle
         try:
+            progress_callback = self._lease_progress_callback(progress_callback)
             if progress_callback is None:
                 result = await self._run_bootstrap(
                     space_key,
@@ -118,6 +121,7 @@ class SyncService:
             self._run_post_sync_sqlite_maintenance()
             return result
         finally:
+            self._active_sync_lease = None
             self._release_sync_lease(lease_handle)
 
     async def run_incremental_async(
@@ -128,7 +132,9 @@ class SyncService:
         cancel_requested: CancelCallback | None = None,
     ) -> SyncResult:
         lease_handle = self._acquire_sync_lease(mode="incremental", space_key=space_key)
+        self._active_sync_lease = lease_handle
         try:
+            progress_callback = self._lease_progress_callback(progress_callback)
             if progress_callback is None:
                 result = await self._run_incremental(
                     space_key,
@@ -145,6 +151,7 @@ class SyncService:
             self._run_post_sync_sqlite_maintenance()
             return result
         finally:
+            self._active_sync_lease = None
             self._release_sync_lease(lease_handle)
 
     async def _run_bootstrap(
@@ -814,8 +821,8 @@ class SyncService:
         rendered_parts.append(markdown_body[cursor:])
         return "".join(rendered_parts), inline_image_keys, new_body_assets
 
-    @staticmethod
-    def _raise_if_cancelled(cancel_requested: CancelCallback | None) -> None:
+    def _raise_if_cancelled(self, cancel_requested: CancelCallback | None) -> None:
+        self._renew_sync_lease()
         if cancel_requested is not None and cancel_requested():
             raise SyncCancelledError("cancelled by user")
 
@@ -823,13 +830,28 @@ class SyncService:
         return self.sync_lease_service.acquire(
             holder_kind=mode,
             holder_scope=f"{space_key}:{uuid.uuid4().hex[:8]}",
-            ttl_seconds=21600,
+            ttl_seconds=300,
         )
+
+    def _renew_sync_lease(self) -> None:
+        if self._active_sync_lease is None:
+            return
+        self.sync_lease_service.renew(self._active_sync_lease)
 
     def _release_sync_lease(self, lease_handle: SyncLeaseHandle | None) -> None:
         if lease_handle is None:
             return
         self.sync_lease_service.release(lease_handle)
+
+    def _lease_progress_callback(self, progress_callback: ProgressCallback | None) -> ProgressCallback | None:
+        if progress_callback is None:
+            return None
+
+        def wrapped(progress: int, message: str) -> None:
+            self._renew_sync_lease()
+            progress_callback(progress, message)
+
+        return wrapped
 
     def _emit_progress(
         self,

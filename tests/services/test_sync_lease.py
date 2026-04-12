@@ -84,3 +84,25 @@ def test_sync_lease_can_be_renewed(sample_settings_dict, tmp_path):
 
     assert before is not None and after is not None
     assert after >= before
+
+
+def test_sync_lease_can_be_force_released(sample_settings_dict, tmp_path):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+        }
+    )
+    lease_service = SyncLeaseService(settings)
+
+    handle = lease_service.acquire(holder_kind="bootstrap", holder_scope="DEMO", ttl_seconds=600)
+
+    with pytest.raises(SyncLeaseConflictError):
+        lease_service.acquire(holder_kind="incremental", holder_scope="OPS", ttl_seconds=600)
+
+    lease_service.force_release()
+
+    recovered = lease_service.acquire(holder_kind="incremental", holder_scope="OPS", ttl_seconds=600)
+    lease_service.release(recovered)

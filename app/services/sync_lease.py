@@ -95,6 +95,41 @@ class SyncLeaseService:
         finally:
             session.close()
 
+    def get_active_lease(self) -> dict[str, object] | None:
+        session = self.session_factory()
+        try:
+            now = self._utcnow()
+            lease = session.scalar(select(SyncLease).where(SyncLease.lock_name == self.GLOBAL_SYNC_LOCK))
+            if lease is None:
+                return None
+            if lease.expires_at <= now:
+                session.delete(lease)
+                session.commit()
+                return None
+            return {
+                "lock_name": lease.lock_name,
+                "owner_id": lease.owner_id,
+                "holder_kind": lease.holder_kind,
+                "holder_scope": lease.holder_scope,
+                "acquired_at": lease.acquired_at,
+                "updated_at": lease.updated_at,
+                "expires_at": lease.expires_at,
+            }
+        finally:
+            session.close()
+
+    def force_release(self) -> bool:
+        session = self.session_factory()
+        try:
+            lease = session.scalar(select(SyncLease).where(SyncLease.lock_name == self.GLOBAL_SYNC_LOCK))
+            if lease is None:
+                return False
+            session.delete(lease)
+            session.commit()
+            return True
+        finally:
+            session.close()
+
     def release(self, handle: SyncLeaseHandle) -> None:
         session = self.session_factory()
         try:

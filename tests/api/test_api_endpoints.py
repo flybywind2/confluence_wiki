@@ -36,7 +36,13 @@ def test_admin_sync_endpoint_runs_inside_fastapi_event_loop(sample_settings_dict
     test_app = create_app(settings=settings, allow_test_fallback=False)
     client = TestClient(test_app)
 
-    async def fake_run_incremental(self, space_key: str, now=None):
+    async def fake_run_incremental(
+        self,
+        space_key: str,
+        now=None,
+        progress_callback=None,
+        cancel_requested=None,
+    ):
         return SyncResult(mode="incremental", space_key=space_key, processed_pages=0, processed_assets=0)
 
     monkeypatch.setattr(SyncService, "_run_incremental", fake_run_incremental)

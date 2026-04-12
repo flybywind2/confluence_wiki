@@ -29,6 +29,7 @@ from app.db.models import KnowledgeDocument, Page, PageVersion, Space, User, Wik
 from app.graph.builder import build_graph_payload, build_knowledge_graph_payload
 from app.services.auth_service import authenticate_user, create_user, role_allows
 from app.services.schedule_service import ScheduleService
+from app.services.sync_lease import SyncLeaseService
 from app.services.space_registry import upsert_space
 from app.services.wiki_writer import write_markdown_file
 from app.services.knowledge_service import KnowledgeService
@@ -99,6 +100,10 @@ def _is_sqlite_lock_error(exc: Exception) -> bool:
 
 def _admin_write_locked_redirect(target: str) -> RedirectResponse:
     return _admin_redirect(error=f"{target} 저장 중 DB가 사용 중입니다. 잠시 후 다시 시도해주세요.")
+
+
+def _active_sync_job_overview(request: Request) -> dict:
+    return _query_jobs(request).list_jobs(job_types={"bootstrap", "incremental"})
 
 
 def _ensure_html_role(session, request: Request, required_role: str = "viewer") -> User | RedirectResponse:
@@ -739,17 +744,19 @@ async def admin_operations(
         auth_result = _ensure_html_role(session, request, "admin")
         if isinstance(auth_result, RedirectResponse):
             return auth_result
-        schedule_service = ScheduleService(_settings(request))
+        settings = _settings(request)
+        schedule_service = ScheduleService(settings)
         operation_rows = schedule_service.operations_rows(session)
         summary = {
             "space_count": len(operation_rows),
             "enabled_space_count": sum(1 for row in operation_rows if row["enabled"]),
             "enabled_schedule_count": sum(1 for row in operation_rows if row["schedule"]["enabled"]),
             "due_schedule_count": sum(1 for row in operation_rows if row["schedule"]["due"]),
-            "app_timezone": _settings(request).app_timezone,
-            "internal_scheduler_enabled": _settings(request).internal_scheduler_enabled,
-            "internal_scheduler_poll_seconds": _settings(request).internal_scheduler_poll_seconds,
+            "app_timezone": settings.app_timezone,
+            "internal_scheduler_enabled": settings.internal_scheduler_enabled,
+            "internal_scheduler_poll_seconds": settings.internal_scheduler_poll_seconds,
         }
+        active_sync_lease = SyncLeaseService(settings).get_active_lease()
         return _templates(request).TemplateResponse(
             request,
             "admin_operations.html",
@@ -762,6 +769,7 @@ async def admin_operations(
                     "meta_description": _meta_description("Confluence bootstrap과 증분 동기화 스케줄 관리"),
                     "operation_rows": operation_rows,
                     "operations_summary": summary,
+                    "active_sync_lease": active_sync_lease,
                     "notice": notice or "",
                     "error": error or "",
                 },
@@ -863,6 +871,24 @@ async def admin_run_space_bootstrap(
     except Exception as exc:  # noqa: BLE001
         return _admin_redirect(error=f"{space_key} bootstrap 실패: {exc}")
     return _admin_redirect(notice=f"{space_key} bootstrap을 실행했습니다.")
+
+
+@router.post("/admin/sync-lease/release")
+async def admin_release_sync_lease(request: Request) -> RedirectResponse:
+    session = _session_factory(request)()
+    try:
+        _ensure_api_role(session, request, "admin")
+    finally:
+        session.close()
+
+    overview = _active_sync_job_overview(request)
+    if overview.get("running") or overview.get("queued"):
+        return _admin_redirect(error="실행 중이거나 대기 중인 동기화 작업이 있어 sync lease를 해제할 수 없습니다.")
+
+    released = SyncLeaseService(_settings(request)).force_release()
+    if not released:
+        return _admin_redirect(notice="해제할 sync lease가 없습니다.")
+    return _admin_redirect(notice="stale sync lease를 해제했습니다.")
 
 
 @router.post("/admin/spaces/{space_key}/sync")

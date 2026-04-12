@@ -23,6 +23,21 @@
   </div>
   {% endif %}
 
+  {% if active_sync_lease %}
+  <section class="history-panel">
+    <div class="history-banner admin-error-banner">
+      <div>
+        <strong>활성 Sync Lease</strong>
+        <span class="page-meta"> · {{ active_sync_lease.holder_kind }} / {{ active_sync_lease.holder_scope }} / 만료 {{ active_sync_lease.expires_at }}</span>
+      </div>
+      <form class="page-action-form" action="/admin/sync-lease/release" method="post">
+        <button type="submit" class="source-link source-button">stale lease 해제</button>
+      </form>
+    </div>
+    <p class="page-summary">현재 실행 중인 동기화 작업이 없는데도 lease가 남아 있으면 이 버튼으로 복구합니다.</p>
+  </section>
+  {% endif %}
+
   <section class="history-panel">
     <div class="section-header">
       <h2>요약</h2>

@@ -13,6 +13,7 @@ from app.db.session import create_session_factory
 from app.demo_seed import seed_demo_content
 from app.main import create_app
 from app.services.schedule_service import ScheduleService
+from app.services.sync_lease import SyncLeaseService
 from app.services.sync_service import SyncResult, SyncService
 
 
@@ -46,6 +47,10 @@ def _login(client: TestClient, role: str = "admin"):
 
 def _redirect_error_message(location: str) -> str:
     return parse_qs(urlparse(location).query).get("error", [""])[0]
+
+
+def _redirect_notice_message(location: str) -> str:
+    return parse_qs(urlparse(location).query).get("notice", [""])[0]
 
 
 def test_admin_can_open_operations_page(tmp_path, sample_settings_dict):
@@ -185,6 +190,23 @@ def test_admin_can_trigger_bootstrap_from_operations_ui(tmp_path, sample_setting
     assert response.status_code == 303
     assert response.headers["location"].startswith("/admin/operations")
     assert calls == [("OPS", "123456")]
+
+
+def test_admin_can_force_release_active_sync_lease(tmp_path, sample_settings_dict):
+    settings, app = _make_app(tmp_path, sample_settings_dict)
+    client = TestClient(app)
+    _login(client, "admin")
+
+    lease_service = SyncLeaseService(settings)
+    handle = lease_service.acquire(holder_kind="bootstrap", holder_scope="DEMO:test", ttl_seconds=600)
+
+    response = client.post("/admin/sync-lease/release", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert "sync lease" in _redirect_notice_message(response.headers["location"])
+
+    recovered = lease_service.acquire(holder_kind="incremental", holder_scope="OPS:test", ttl_seconds=600)
+    lease_service.release(recovered)
 
 
 def test_due_schedule_endpoint_runs_enabled_due_schedules(tmp_path, sample_settings_dict, monkeypatch):
