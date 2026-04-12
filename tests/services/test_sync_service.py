@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from app.core.config import Settings
 from app.services.sync_lease import SyncLeaseConflictError
@@ -62,7 +63,9 @@ def test_sync_service_renews_lease_while_running(sample_settings_dict, tmp_path,
         if progress_callback is None and len(args) >= 3:
             progress_callback = args[2]
         if progress_callback:
+            service._sync_lease_next_renewal_at = service._utcnow()
             progress_callback(20, "첫 번째 단계")
+            service._sync_lease_next_renewal_at = service._utcnow()
             progress_callback(50, "두 번째 단계")
         return type("Result", (), {"mode": "bootstrap", "space_key": "DEMO", "processed_pages": 1, "processed_assets": 0})()
 
@@ -79,3 +82,30 @@ def test_sync_service_renews_lease_while_running(sample_settings_dict, tmp_path,
 
     assert result.processed_pages == 1
     assert renew_calls == ["owner-1", "owner-1"]
+
+
+def test_sync_service_does_not_fail_when_lease_renew_hits_sqlite_lock(sample_settings_dict, tmp_path, monkeypatch):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+        }
+    )
+    service = SyncService(settings=settings)
+    service._active_sync_lease = SyncLeaseHandle(
+        lock_name="sqlite-sync-writer",
+        owner_id="owner-1",
+        holder_kind="bootstrap",
+        holder_scope="DEMO:test",
+        ttl_seconds=300,
+    )
+    service._sync_lease_next_renewal_at = service._utcnow()
+
+    def raise_locked(_lease_handle):
+        raise OperationalError("UPDATE sync_leases", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(service.sync_lease_service, "renew", raise_locked)
+
+    service._renew_sync_lease()

@@ -6,7 +6,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 from urllib.parse import unquote, urljoin, urlparse
@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 from sqlalchemy import delete, select
+from sqlalchemy.exc import OperationalError
 
 from app.clients.confluence import ConfluenceClient, is_missing_attachment_redirect
 from app.core.config import Settings, get_settings
@@ -81,6 +82,7 @@ class SyncService:
         self.session_factory = create_session_factory(self.settings.database_url)
         self.sync_lease_service = SyncLeaseService(self.settings)
         self._active_sync_lease: SyncLeaseHandle | None = None
+        self._sync_lease_next_renewal_at: datetime | None = None
         self.settings.wiki_root.mkdir(parents=True, exist_ok=True)
         self.settings.cache_root.mkdir(parents=True, exist_ok=True)
 
@@ -103,6 +105,7 @@ class SyncService:
     ) -> SyncResult:
         lease_handle = self._acquire_sync_lease(mode="bootstrap", space_key=space_key)
         self._active_sync_lease = lease_handle
+        self._sync_lease_next_renewal_at = self._compute_next_sync_renewal_at(lease_handle)
         try:
             progress_callback = self._lease_progress_callback(progress_callback)
             if progress_callback is None:
@@ -122,6 +125,7 @@ class SyncService:
             return result
         finally:
             self._active_sync_lease = None
+            self._sync_lease_next_renewal_at = None
             self._release_sync_lease(lease_handle)
 
     async def run_incremental_async(
@@ -133,6 +137,7 @@ class SyncService:
     ) -> SyncResult:
         lease_handle = self._acquire_sync_lease(mode="incremental", space_key=space_key)
         self._active_sync_lease = lease_handle
+        self._sync_lease_next_renewal_at = self._compute_next_sync_renewal_at(lease_handle)
         try:
             progress_callback = self._lease_progress_callback(progress_callback)
             if progress_callback is None:
@@ -152,6 +157,7 @@ class SyncService:
             return result
         finally:
             self._active_sync_lease = None
+            self._sync_lease_next_renewal_at = None
             self._release_sync_lease(lease_handle)
 
     async def _run_bootstrap(
@@ -836,12 +842,36 @@ class SyncService:
     def _renew_sync_lease(self) -> None:
         if self._active_sync_lease is None:
             return
-        self.sync_lease_service.renew(self._active_sync_lease)
+        now = self._utcnow()
+        if self._sync_lease_next_renewal_at is not None and now < self._sync_lease_next_renewal_at:
+            return
+        try:
+            self.sync_lease_service.renew(self._active_sync_lease)
+        except OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            logger.warning("sqlite sync lease renew skipped because database is locked")
+            self._sync_lease_next_renewal_at = now.replace(microsecond=0) + self._renew_retry_interval(self._active_sync_lease)
+            return
+        self._sync_lease_next_renewal_at = self._compute_next_sync_renewal_at(self._active_sync_lease, now)
 
     def _release_sync_lease(self, lease_handle: SyncLeaseHandle | None) -> None:
         if lease_handle is None:
             return
         self.sync_lease_service.release(lease_handle)
+
+    def _compute_next_sync_renewal_at(
+        self,
+        lease_handle: SyncLeaseHandle,
+        now: datetime | None = None,
+    ) -> datetime:
+        base_time = now or self._utcnow()
+        return base_time + self._renew_retry_interval(lease_handle, success=True)
+
+    @staticmethod
+    def _renew_retry_interval(lease_handle: SyncLeaseHandle, *, success: bool = False):
+        seconds = max(5, lease_handle.ttl_seconds // (2 if success else 6))
+        return timedelta(seconds=seconds)
 
     def _lease_progress_callback(self, progress_callback: ProgressCallback | None) -> ProgressCallback | None:
         if progress_callback is None:
