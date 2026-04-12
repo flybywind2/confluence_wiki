@@ -565,7 +565,11 @@ class SyncService:
 
             logger.debug("rebuilding materialized views space=%s", space_key)
             self._raise_if_cancelled(cancel_requested)
-            self._rebuild_materialized_views(session)
+            self._rebuild_materialized_views(
+                session,
+                progress_callback=progress_callback,
+                cancel_requested=cancel_requested,
+            )
             logger.debug("rebuilt materialized views space=%s", space_key)
 
             sync_run.status = "success"
@@ -921,7 +925,12 @@ class SyncService:
         finally:
             session.close()
 
-    def _rebuild_materialized_views(self, session) -> None:
+    def _rebuild_materialized_views(
+        self,
+        session,
+        progress_callback: ProgressCallback | None = None,
+        cancel_requested: CancelCallback | None = None,
+    ) -> None:
         grouped_documents: dict[str, list[dict[str, str]]] = {}
         all_pages = session.scalars(select(Page)).all()
         spaces = session.scalars(select(Space)).all()
@@ -930,7 +939,15 @@ class SyncService:
         lint_service = LintService(self.settings)
         all_page_documents: list[dict[str, str]] = []
         global_space = ensure_global_knowledge_space(session)
+
+        logger.info("rebuild stage space=%s step=knowledge", global_space.space_key)
+        self._emit_progress(progress_callback, 93, "지식 문서를 재구성하는 중입니다.")
+        self._raise_if_cancelled(cancel_requested)
         knowledge_service.rebuild_global_with_session(session)
+
+        logger.info("rebuild stage space=%s step=lint", global_space.space_key)
+        self._emit_progress(progress_callback, 95, "lint 보고서를 재구성하는 중입니다.")
+        self._raise_if_cancelled(cancel_requested)
         lint_service.rebuild_global_with_session(session)
         all_knowledge_documents = [
             {
@@ -946,6 +963,8 @@ class SyncService:
                 select(KnowledgeDocument).where(KnowledgeDocument.space_id == global_space.id)
             ).all()
         ]
+        logger.info("rebuild stage space=%s step=index", global_space.space_key)
+        self._emit_progress(progress_callback, 97, "인덱스를 재구성하는 중입니다.")
         for space_id, space_key in sorted(space_lookup.items(), key=lambda item: item[1]):
             if space_key == global_space.space_key:
                 continue
@@ -978,6 +997,9 @@ class SyncService:
 
         build_global_index(self.settings.wiki_root, grouped_documents)
 
+        logger.info("rebuild stage space=%s step=graph", global_space.space_key)
+        self._emit_progress(progress_callback, 99, "그래프 캐시를 재구성하는 중입니다.")
+        self._raise_if_cancelled(cancel_requested)
         page_id_lookup = {page.id: page for page in all_pages}
         nodes = [
             {

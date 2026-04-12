@@ -3,6 +3,7 @@ import asyncio
 import pytest
 from sqlalchemy.exc import OperationalError
 
+import app.services.sync_service as sync_service_module
 from app.core.config import Settings
 from app.services.sync_lease import SyncLeaseConflictError
 from app.services.sync_service import SyncLeaseHandle, SyncService
@@ -109,3 +110,37 @@ def test_sync_service_does_not_fail_when_lease_renew_hits_sqlite_lock(sample_set
     monkeypatch.setattr(service.sync_lease_service, "renew", raise_locked)
 
     service._renew_sync_lease()
+
+
+def test_rebuild_materialized_views_emits_stage_progress(sample_settings_dict, tmp_path, monkeypatch):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+        }
+    )
+    service = SyncService(settings=settings)
+    session = service.session_factory()
+    events: list[tuple[int, str]] = []
+
+    monkeypatch.setattr(sync_service_module.KnowledgeService, "rebuild_global_with_session", lambda self, session: [])
+    monkeypatch.setattr(sync_service_module.LintService, "rebuild_global_with_session", lambda self, session: None)
+    monkeypatch.setattr(sync_service_module, "build_global_index", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sync_service_module, "write_graph_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sync_service_module, "write_named_graph_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sync_service_module, "build_graph_payload", lambda **kwargs: {"nodes": [], "edges": []})
+    monkeypatch.setattr(sync_service_module, "build_knowledge_graph_payload", lambda **kwargs: {"nodes": [], "edges": []})
+
+    try:
+        service._rebuild_materialized_views(session, progress_callback=lambda progress, message: events.append((progress, message)))
+    finally:
+        session.close()
+
+    assert events == [
+        (93, "지식 문서를 재구성하는 중입니다."),
+        (95, "lint 보고서를 재구성하는 중입니다."),
+        (97, "인덱스를 재구성하는 중입니다."),
+        (99, "그래프 캐시를 재구성하는 중입니다."),
+    ]
