@@ -102,10 +102,6 @@ class SyncLeaseService:
             lease = session.scalar(select(SyncLease).where(SyncLease.lock_name == self.GLOBAL_SYNC_LOCK))
             if lease is None:
                 return None
-            if lease.expires_at <= now:
-                session.delete(lease)
-                session.commit()
-                return None
             return {
                 "lock_name": lease.lock_name,
                 "owner_id": lease.owner_id,
@@ -114,6 +110,7 @@ class SyncLeaseService:
                 "acquired_at": lease.acquired_at,
                 "updated_at": lease.updated_at,
                 "expires_at": lease.expires_at,
+                "is_expired": lease.expires_at <= now,
             }
         finally:
             session.close()

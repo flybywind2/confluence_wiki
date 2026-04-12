@@ -106,3 +106,39 @@ def test_sync_lease_can_be_force_released(sample_settings_dict, tmp_path):
 
     recovered = lease_service.acquire(holder_kind="incremental", holder_scope="OPS", ttl_seconds=600)
     lease_service.release(recovered)
+
+
+def test_get_active_lease_reports_expired_lease_without_deleting_it(sample_settings_dict, tmp_path):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+        }
+    )
+    lease_service = SyncLeaseService(settings)
+
+    handle = lease_service.acquire(holder_kind="bootstrap", holder_scope="DEMO", ttl_seconds=1)
+
+    session = lease_service.session_factory()
+    try:
+        lease = session.scalar(select(SyncLease).where(SyncLease.owner_id == handle.owner_id))
+        assert lease is not None
+        lease.expires_at = lease_service._utcnow()
+        session.commit()
+    finally:
+        session.close()
+
+    active = lease_service.get_active_lease()
+
+    assert active is not None
+    assert active["owner_id"] == handle.owner_id
+    assert active["is_expired"] is True
+
+    session = lease_service.session_factory()
+    try:
+        lease = session.scalar(select(SyncLease).where(SyncLease.owner_id == handle.owner_id))
+        assert lease is not None
+    finally:
+        session.close()
