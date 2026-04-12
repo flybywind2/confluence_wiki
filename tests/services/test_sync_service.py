@@ -125,7 +125,11 @@ def test_rebuild_materialized_views_emits_stage_progress(sample_settings_dict, t
     session = service.session_factory()
     events: list[tuple[int, str]] = []
 
-    monkeypatch.setattr(sync_service_module.KnowledgeService, "rebuild_global_with_session", lambda self, session: [])
+    monkeypatch.setattr(
+        sync_service_module.KnowledgeService,
+        "rebuild_global_with_session",
+        lambda self, session, selected_page_ids=None, progress_callback=None: [],
+    )
     monkeypatch.setattr(sync_service_module.LintService, "rebuild_global_with_session", lambda self, session: None)
     monkeypatch.setattr(sync_service_module, "build_global_index", lambda *args, **kwargs: None)
     monkeypatch.setattr(sync_service_module, "write_graph_cache", lambda *args, **kwargs: None)
@@ -144,3 +148,36 @@ def test_rebuild_materialized_views_emits_stage_progress(sample_settings_dict, t
         (97, "인덱스를 재구성하는 중입니다."),
         (99, "그래프 캐시를 재구성하는 중입니다."),
     ]
+
+
+def test_rebuild_materialized_views_passes_selected_page_ids_to_knowledge_rebuild(sample_settings_dict, tmp_path, monkeypatch):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+        }
+    )
+    service = SyncService(settings=settings)
+    session = service.session_factory()
+    captured: list[set[int] | None] = []
+
+    monkeypatch.setattr(
+        sync_service_module.KnowledgeService,
+        "rebuild_global_with_session",
+        lambda self, session, selected_page_ids=None, progress_callback=None: captured.append(selected_page_ids) or [],
+    )
+    monkeypatch.setattr(sync_service_module.LintService, "rebuild_global_with_session", lambda self, session: None)
+    monkeypatch.setattr(sync_service_module, "build_global_index", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sync_service_module, "write_graph_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sync_service_module, "write_named_graph_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sync_service_module, "build_graph_payload", lambda **kwargs: {"nodes": [], "edges": []})
+    monkeypatch.setattr(sync_service_module, "build_knowledge_graph_payload", lambda **kwargs: {"nodes": [], "edges": []})
+
+    try:
+        service._rebuild_materialized_views(session, selected_page_ids={1, 2})
+    finally:
+        session.close()
+
+    assert captured == [{1, 2}]

@@ -1,6 +1,9 @@
 import json
 
+from sqlalchemy import select
+
 from app.core.config import Settings
+from app.db.models import Page
 from app.demo_seed import seed_demo_content
 from app.llm.text_client import TextLLMClient
 from app.services.knowledge_service import KnowledgeService
@@ -149,6 +152,73 @@ def test_rebuild_global_passes_existing_topics_and_existing_body_to_llm_editor(
     assert update_calls
     assert any(str(call["existing_content"]).strip() for call in update_calls)
     assert any("## 관련 문서" in str(call["existing_content"]) for call in update_calls if str(call["existing_content"]).strip())
+
+
+def test_rebuild_global_with_selected_page_ids_only_rebuilds_touched_topics(tmp_path, sample_settings_dict, monkeypatch):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    sample_settings_dict["DATABASE_URL"] = f"sqlite:///{tmp_path / 'app.db'}"
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+    service = KnowledgeService(settings)
+    session = service.session_factory()
+    summarize_titles: list[str] = []
+    update_topics: list[str] = []
+    try:
+        arch_page = session.scalar(select(Page).where(Page.slug == "architecture-notes-9101"))
+        assert arch_page is not None
+        monkeypatch.setattr(
+            service.text_client,
+            "summarize_fact_card",
+            lambda title, text, prefer_llm=True: summarize_titles.append(title) or "",
+        )
+        monkeypatch.setattr(
+            service.text_client,
+            "propose_topics_for_document",
+            lambda **kwargs: ["아키텍처"],
+        )
+        monkeypatch.setattr(service.text_client, "classify_topic_type", lambda **kwargs: "concept")
+        monkeypatch.setattr(
+            service.text_client,
+            "update_topic_page",
+            lambda **kwargs: update_topics.append(str(kwargs["topic"]))
+            or "\n".join(
+                [
+                    f"# {kwargs['topic']}",
+                    "",
+                    "## 개요",
+                    "",
+                    "테스트 재구성 결과",
+                    "",
+                    "## 핵심 사실",
+                    "",
+                    "- 테스트",
+                    "",
+                    "## 관련 문서",
+                    "",
+                    "- 테스트",
+                    "",
+                    "## 관련 주제",
+                    "",
+                    "- 없음",
+                    "",
+                    "## 원문 근거",
+                    "",
+                    "- 테스트",
+                ]
+            ),
+        )
+
+        service.rebuild_global_with_session(session, selected_page_ids={arch_page.id})
+    finally:
+        session.rollback()
+        session.close()
+
+    assert "운영 대시보드" not in summarize_titles
+    assert "동기화 런북" not in summarize_titles
+    assert "아키텍처 메모" in summarize_titles
+    assert "Confluence Wiki Demo 홈" in summarize_titles
+    assert set(update_topics) <= {"아키텍처", "아키텍처 메모"}
 
 
 def test_ensure_keyword_sections_replaces_title_only_key_facts_with_multiple_real_content_lines(tmp_path, sample_settings_dict):

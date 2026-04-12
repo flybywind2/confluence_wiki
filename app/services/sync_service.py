@@ -567,6 +567,7 @@ class SyncService:
             self._raise_if_cancelled(cancel_requested)
             self._rebuild_materialized_views(
                 session,
+                selected_page_ids={page.id for page in page_records.values()},
                 progress_callback=progress_callback,
                 cancel_requested=cancel_requested,
             )
@@ -928,6 +929,7 @@ class SyncService:
     def _rebuild_materialized_views(
         self,
         session,
+        selected_page_ids: set[int] | None = None,
         progress_callback: ProgressCallback | None = None,
         cancel_requested: CancelCallback | None = None,
     ) -> None:
@@ -943,7 +945,11 @@ class SyncService:
         logger.info("rebuild stage space=%s step=knowledge", global_space.space_key)
         self._emit_progress(progress_callback, 93, "지식 문서를 재구성하는 중입니다.")
         self._raise_if_cancelled(cancel_requested)
-        knowledge_service.rebuild_global_with_session(session)
+        knowledge_service.rebuild_global_with_session(
+            session,
+            selected_page_ids=selected_page_ids,
+            progress_callback=progress_callback,
+        )
 
         logger.info("rebuild stage space=%s step=lint", global_space.space_key)
         self._emit_progress(progress_callback, 95, "lint 보고서를 재구성하는 중입니다.")

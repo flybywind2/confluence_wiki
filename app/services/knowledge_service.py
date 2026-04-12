@@ -488,10 +488,25 @@ class KnowledgeService:
     def rebuild_space_with_session(self, session, space_key: str) -> list[KnowledgeDocument]:
         return self.rebuild_global_with_session(session)
 
-    def rebuild_global_with_session(self, session) -> list[KnowledgeDocument]:
+    def rebuild_global_with_session(
+        self,
+        session,
+        selected_page_ids: set[int] | None = None,
+        progress_callback: Callable[[int, str], None] | None = None,
+    ) -> list[KnowledgeDocument]:
         global_space = ensure_global_knowledge_space(session)
         existing_keyword_topics = self._existing_topic_context(session, global_space.id)
         wiki_state = self._build_wiki_state_snapshot(session, existing_keyword_topics)
+
+        if selected_page_ids:
+            return self._rebuild_selected_topics_with_session(
+                session,
+                global_space=global_space,
+                existing_keyword_topics=existing_keyword_topics,
+                wiki_state=wiki_state,
+                selected_page_ids=selected_page_ids,
+                progress_callback=progress_callback,
+            )
 
         session.execute(
             delete(KnowledgeDocument).where(
@@ -500,16 +515,151 @@ class KnowledgeService:
         )
         session.flush()
 
-        page_rows = session.execute(
+        page_rows = self._load_page_rows(session)
+        docs: list[KnowledgeDocument] = []
+        fact_cards = self._build_fact_cards_from_page_rows(page_rows, progress_callback=progress_callback)
+
+        for keyword in self._build_keyword_documents(
+            fact_cards,
+            existing_keyword_topics,
+            wiki_state,
+            progress_callback=progress_callback,
+        ):
+            docs.append(
+                self._upsert_document(
+                    session=session,
+                    space=global_space,
+                    kind="keyword",
+                    slug=keyword["slug"],
+                    title=keyword["title"],
+                    summary=keyword["summary"],
+                    body=keyword["body"],
+                    source_refs=keyword["source_refs"],
+                )
+            )
+        return docs
+
+    def _rebuild_selected_topics_with_session(
+        self,
+        session,
+        *,
+        global_space: Space,
+        existing_keyword_topics: dict[str, dict[str, str]],
+        wiki_state: str,
+        selected_page_ids: set[int],
+        progress_callback: Callable[[int, str], None] | None = None,
+    ) -> list[KnowledgeDocument]:
+        page_rows = self._load_page_rows(session, selected_page_ids)
+        if not page_rows:
+            return []
+
+        fact_cards = self._build_fact_cards_from_page_rows(page_rows, progress_callback=progress_callback)
+        existing_topic_titles = [topic["title"] for topic in existing_keyword_topics.values()]
+        selected_topics_by_slug, _total_scores, _doc_counts = self._select_topics_for_fact_cards(
+            fact_cards,
+            existing_topic_titles,
+            wiki_state,
+        )
+        selected_topic_keys_by_slug = {
+            slug: [self._normalize_topic_key(topic) for topic in topics]
+            for slug, topics in selected_topics_by_slug.items()
+        }
+        selected_titles_by_key = {
+            self._normalize_topic_key(topic): topic
+            for topics in selected_topics_by_slug.values()
+            for topic in topics
+        }
+        affected_page_refs = {(str(item["space_key"]), str(item["slug"])) for item in fact_cards}
+        affected_topic_keys = set(selected_titles_by_key)
+
+        for topic_key, topic_context in existing_keyword_topics.items():
+            topic_refs = set(self._knowledge_source_page_keys(topic_context.get("source_refs", "")))
+            if topic_refs & affected_page_refs:
+                affected_topic_keys.add(topic_key)
+
+        if not affected_topic_keys:
+            return []
+
+        related_counts: dict[str, Counter[str]] = {}
+        for slug, topic_keys in selected_topic_keys_by_slug.items():
+            for topic_key in topic_keys:
+                neighbors = [candidate for candidate in topic_keys if candidate != topic_key]
+                if not neighbors:
+                    continue
+                related_counts.setdefault(topic_key, Counter()).update(neighbors)
+
+        docs: list[KnowledgeDocument] = []
+        total_topics = len(affected_topic_keys)
+        for index, topic_key in enumerate(sorted(affected_topic_keys), start=1):
+            if progress_callback is not None:
+                progress_callback(94, f"지식 주제 {index}/{total_topics}건을 재구성하는 중입니다.")
+            existing_topic = existing_keyword_topics.get(topic_key, {})
+            topic_title = str(existing_topic.get("title") or selected_titles_by_key.get(topic_key) or topic_key).strip()
+            retained_refs = [
+                ref for ref in self._knowledge_source_page_keys(existing_topic.get("source_refs", "")) if ref not in affected_page_refs
+            ]
+            retained_items = self._load_raw_source_items_for_refs(session, retained_refs)
+            current_items = [
+                item
+                for item in fact_cards
+                if topic_key in selected_topic_keys_by_slug.get(str(item["slug"]), [])
+            ]
+            merged_items = self._merge_source_items(retained_items, current_items)
+            existing_doc = session.scalar(
+                select(KnowledgeDocument).where(
+                    KnowledgeDocument.space_id == global_space.id,
+                    KnowledgeDocument.kind == "keyword",
+                    KnowledgeDocument.slug == str(existing_topic.get("slug") or self._keyword_slug(topic_title)),
+                )
+            )
+            if not merged_items:
+                if existing_doc is not None:
+                    self._delete_document_record(session, existing_doc)
+                continue
+            rebuilt = self._build_keyword_document(
+                topic=topic_title,
+                items=merged_items,
+                existing_body=str(existing_topic.get("body") or self._document_body(existing_doc)),
+                wiki_state=wiki_state,
+                related_topics=[
+                    existing_keyword_topics.get(candidate, {}).get("title") or selected_titles_by_key.get(candidate, candidate)
+                    for candidate, _count in related_counts.get(topic_key, Counter()).most_common(6)
+                ],
+                source_refs_override="\n".join(self._page_reference(item) for item in merged_items),
+            )
+            docs.append(
+                self._upsert_document(
+                    session=session,
+                    space=global_space,
+                    kind="keyword",
+                    slug=rebuilt["slug"],
+                    title=rebuilt["title"],
+                    summary=rebuilt["summary"],
+                    body=rebuilt["body"],
+                    source_refs=rebuilt["source_refs"],
+                )
+            )
+        return docs
+
+    def _load_page_rows(self, session, selected_page_ids: set[int] | None = None):
+        statement = (
             select(Page, WikiDocument, Space)
             .join(WikiDocument, WikiDocument.page_id == Page.id)
             .join(Space, Space.id == Page.space_id)
             .where(Space.space_key != GLOBAL_KNOWLEDGE_SPACE_KEY)
-        ).all()
-        docs: list[KnowledgeDocument] = []
-        fact_cards: list[dict[str, str]] = []
+        )
+        if selected_page_ids:
+            statement = statement.where(Page.id.in_(selected_page_ids))
+        return session.execute(statement).all()
 
-        for page, wiki_document, page_space in page_rows:
+    def _build_fact_cards_from_page_rows(
+        self,
+        page_rows,
+        progress_callback: Callable[[int, str], None] | None = None,
+    ) -> list[dict[str, str]]:
+        fact_cards: list[dict[str, str]] = []
+        total_rows = len(page_rows)
+        for index, (page, wiki_document, page_space) in enumerate(page_rows, start=1):
             markdown_path = self.settings.wiki_root / wiki_document.markdown_path
             body = read_markdown_body(markdown_path) if markdown_path.exists() else ""
             summary = wiki_document.summary or self._first_line(body)
@@ -531,21 +681,9 @@ class KnowledgeService:
                     "keyword_signal": keyword_signal,
                 }
             )
-
-        for keyword in self._build_keyword_documents(fact_cards, existing_keyword_topics, wiki_state):
-            docs.append(
-                self._upsert_document(
-                    session=session,
-                    space=global_space,
-                    kind="keyword",
-                    slug=keyword["slug"],
-                    title=keyword["title"],
-                    summary=keyword["summary"],
-                    body=keyword["body"],
-                    source_refs=keyword["source_refs"],
-                )
-            )
-        return docs
+            if progress_callback is not None and total_rows and (index == 1 or index == total_rows or index % 5 == 0):
+                progress_callback(93, f"지식 근거 문서 {index}/{total_rows}건을 정리하는 중입니다.")
+        return fact_cards
 
     def save_analysis(
         self,
@@ -1194,6 +1332,13 @@ class KnowledgeService:
             },
         )
 
+    def _delete_document_record(self, session, doc: KnowledgeDocument) -> None:
+        markdown_path = self.settings.wiki_root / doc.markdown_path
+        if markdown_path.exists():
+            markdown_path.unlink(missing_ok=True)
+        session.delete(doc)
+        session.flush()
+
     def _upsert_document(
         self,
         session,
@@ -1367,31 +1512,17 @@ class KnowledgeService:
         fact_cards: list[dict[str, str]],
         existing_topics: dict[str, dict[str, str]],
         wiki_state: str,
+        progress_callback: Callable[[int, str], None] | None = None,
     ) -> list[dict[str, str]]:
         if not fact_cards:
             return []
 
-        total_scores: Counter[str] = Counter()
-        doc_counts: Counter[str] = Counter()
-        selected_topics_by_slug: dict[str, list[str]] = {}
         existing_topic_titles = [topic["title"] for topic in existing_topics.values()]
-        for item in fact_cards:
-            signal = item["keyword_signal"]
-            selected_topics = self.text_client.propose_topics_for_document(
-                page_title=str(signal["page_title"]),
-                page_summary=str(signal["page_summary"] or ""),
-                body_excerpt=str(item.get("body_excerpt") or item.get("body") or "")[:5000],
-                existing_topics=existing_topic_titles,
-                wiki_state=wiki_state,
-                candidate_topics=self._candidate_topics_from_signal(signal),
-                minimum_count=self._minimum_proposed_topic_count(int(signal.get("doc_length") or 0)),
-            )
-            selected_topics_by_slug[item["slug"]] = selected_topics
-            candidates: dict[str, PhraseCandidate] = signal["candidates"]  # type: ignore[assignment]
-            for topic in selected_topics:
-                topic_key = self._normalize_topic_key(topic)
-                total_scores[topic] += candidates.get(topic_key, PhraseCandidate(key=topic_key, display=topic)).score or 1
-                doc_counts[topic] += 1
+        selected_topics_by_slug, total_scores, doc_counts = self._select_topics_for_fact_cards(
+            fact_cards,
+            existing_topic_titles,
+            wiki_state,
+        )
 
         keyword_pages: dict[str, list[dict[str, str]]] = {}
         co_occurrence: dict[str, Counter[str]] = {}
@@ -1406,10 +1537,14 @@ class KnowledgeService:
                 co_occurrence.setdefault(topic, Counter()).update(neighbors)
 
         documents: list[dict[str, str]] = []
-        for topic, items in sorted(
+        topics_to_build = sorted(
             keyword_pages.items(),
             key=lambda pair: (-doc_counts[pair[0]], -total_scores[pair[0]], pair[0]),
-        ):
+        )
+        total_topics = len(topics_to_build)
+        for index, (topic, items) in enumerate(topics_to_build, start=1):
+            if progress_callback is not None and total_topics:
+                progress_callback(94, f"지식 주제 {index}/{total_topics}건을 재구성하는 중입니다.")
             existing_topic = existing_topics.get(self._normalize_topic_key(topic), {})
             documents.append(
                 self._build_keyword_document(
@@ -1422,6 +1557,34 @@ class KnowledgeService:
                 )
             )
         return documents
+
+    def _select_topics_for_fact_cards(
+        self,
+        fact_cards: list[dict[str, str]],
+        existing_topic_titles: list[str],
+        wiki_state: str,
+    ) -> tuple[dict[str, list[str]], Counter[str], Counter[str]]:
+        total_scores: Counter[str] = Counter()
+        doc_counts: Counter[str] = Counter()
+        selected_topics_by_slug: dict[str, list[str]] = {}
+        for item in fact_cards:
+            signal = item["keyword_signal"]
+            selected_topics = self.text_client.propose_topics_for_document(
+                page_title=str(signal["page_title"]),
+                page_summary=str(signal["page_summary"] or ""),
+                body_excerpt=str(item.get("body_excerpt") or item.get("body") or "")[:5000],
+                existing_topics=existing_topic_titles,
+                wiki_state=wiki_state,
+                candidate_topics=self._candidate_topics_from_signal(signal),
+                minimum_count=self._minimum_proposed_topic_count(int(signal.get("doc_length") or 0)),
+            )
+            selected_topics_by_slug[str(item["slug"])] = selected_topics
+            candidates: dict[str, PhraseCandidate] = signal["candidates"]  # type: ignore[assignment]
+            for topic in selected_topics:
+                topic_key = self._normalize_topic_key(topic)
+                total_scores[topic] += candidates.get(topic_key, PhraseCandidate(key=topic_key, display=topic)).score or 1
+                doc_counts[topic] += 1
+        return selected_topics_by_slug, total_scores, doc_counts
 
     def _build_keyword_document(
         self,
@@ -1481,8 +1644,20 @@ class KnowledgeService:
                     refs.append(normalized)
         return refs
 
-    def _load_raw_source_items(self, session, source_refs: str | None) -> list[dict[str, str]]:
-        refs = self._knowledge_source_page_keys(source_refs)
+    @staticmethod
+    def _merge_source_items(*groups: list[dict[str, str]]) -> list[dict[str, str]]:
+        merged: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for group in groups:
+            for item in group:
+                key = (str(item.get("space_key") or ""), str(item.get("slug") or ""))
+                if not key[0] or not key[1] or key in seen:
+                    continue
+                seen.add(key)
+                merged.append(item)
+        return merged
+
+    def _load_raw_source_items_for_refs(self, session, refs: list[tuple[str, str]]) -> list[dict[str, str]]:
         if not refs:
             return []
         items: list[dict[str, str]] = []
@@ -1521,6 +1696,9 @@ class KnowledgeService:
                 }
             )
         return items
+
+    def _load_raw_source_items(self, session, source_refs: str | None) -> list[dict[str, str]]:
+        return self._load_raw_source_items_for_refs(session, self._knowledge_source_page_keys(source_refs))
 
     @staticmethod
     def _resolve_regenerate_space(selected_space: str | None, source_refs: str | None) -> str | None:
