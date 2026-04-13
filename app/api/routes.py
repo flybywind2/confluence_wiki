@@ -25,8 +25,8 @@ from app.core.knowledge import (
     source_space_keys,
 )
 from app.core.markdown import read_markdown_body, read_markdown_document, render_markdown
-from app.db.models import KnowledgeDocument, Page, PageVersion, Space, User, WikiDocument
-from app.graph.builder import build_graph_payload, build_knowledge_graph_payload
+from app.db.models import KnowledgeDocument, Page, PageLink, PageVersion, Space, User, WikiDocument
+from app.graph.builder import build_graph_payload, build_knowledge_graph_payload, write_graph_cache, write_named_graph_cache
 from app.services.auth_service import authenticate_user, create_user, role_allows
 from app.services.schedule_service import ScheduleService
 from app.services.sync_lease import SyncLeaseService
@@ -654,23 +654,7 @@ def _load_graph_payload(request: Request, selected_space: str | None = None, vie
     graph_path = _settings(request).wiki_root / "global" / filename
     if graph_path.exists():
         payload = json.loads(graph_path.read_text(encoding="utf-8"))
-        if not selected_space:
-            return payload
-        if view == "knowledge":
-            allowed_ids = {
-                node["id"]
-                for node in payload["nodes"]
-                if selected_space in set(node.get("source_spaces") or [node.get("space_key")])
-            }
-            return {
-                "nodes": [node for node in payload["nodes"] if node["id"] in allowed_ids],
-                "edges": [
-                    edge
-                    for edge in payload["edges"]
-                    if edge["source"] in allowed_ids and edge["target"] in allowed_ids
-                ],
-            }
-        return build_graph_payload(payload["nodes"], [{"source": e["source"], "target": e["target"], "link_type": e["type"]} for e in payload["edges"]], selected_space)
+        return _filter_graph_payload(payload, selected_space, view)
 
     session = _session_factory(request)()
     try:
@@ -704,12 +688,47 @@ def _load_graph_payload(request: Request, selected_space: str | None = None, vie
                 }
                 for page, wiki_document, space in page_rows
             ]
-            return build_knowledge_graph_payload(knowledge_documents, page_documents, selected_space)
+            payload = build_knowledge_graph_payload(knowledge_documents, page_documents)
+            write_named_graph_cache(_settings(request).wiki_root, "knowledge-graph.json", payload)
+            return _filter_graph_payload(payload, selected_space, view)
         pages = session.scalars(select(Page)).all()
+        page_id_lookup = {page.id: page for page in pages}
         nodes = [{"id": page.id, "title": page.title, "space_key": page.space.space_key, "slug": page.slug} for page in pages]
-        return build_graph_payload(nodes, [])
+        page_links = session.scalars(select(PageLink)).all()
+        edges = [
+            {"source": link.source_page_id, "target": link.target_page_id, "link_type": link.link_type}
+            for link in page_links
+            if link.source_page_id in page_id_lookup and link.target_page_id in page_id_lookup
+        ]
+        payload = build_graph_payload(nodes, edges)
+        write_graph_cache(_settings(request).wiki_root, payload)
+        return _filter_graph_payload(payload, selected_space, view)
     finally:
         session.close()
+
+
+def _filter_graph_payload(payload: dict, selected_space: str | None, view: str) -> dict:
+    if not selected_space:
+        return payload
+    if view == "knowledge":
+        allowed_ids = {
+            node["id"]
+            for node in payload["nodes"]
+            if selected_space in set(node.get("source_spaces") or [node.get("space_key")])
+        }
+        return {
+            "nodes": [node for node in payload["nodes"] if node["id"] in allowed_ids],
+            "edges": [
+                edge
+                for edge in payload["edges"]
+                if edge["source"] in allowed_ids and edge["target"] in allowed_ids
+            ],
+        }
+    return build_graph_payload(
+        payload["nodes"],
+        [{"source": e["source"], "target": e["target"], "link_type": e["type"]} for e in payload["edges"]],
+        selected_space,
+    )
 
 
 @router.get("/login", response_class=HTMLResponse)

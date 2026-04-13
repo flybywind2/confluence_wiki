@@ -912,6 +912,14 @@ class SyncService:
         except Exception:
             logger.warning("sqlite maintenance failed", exc_info=True)
 
+    def _invalidate_graph_caches(self) -> None:
+        global_root = self.settings.wiki_root / "global"
+        for filename in ("graph.json", "knowledge-graph.json"):
+            try:
+                (global_root / filename).unlink()
+            except FileNotFoundError:
+                continue
+
     def _finalize_sync_run(
         self,
         *,
@@ -974,73 +982,85 @@ class SyncService:
         except KnowledgeRebuildCancelledError as exc:
             raise SyncCancelledError(str(exc)) from exc
 
-        logger.info("rebuild stage space=%s step=lint", global_space.space_key)
-        self._emit_progress(progress_callback, 95, "lint 보고서를 재구성하는 중입니다.")
-        self._raise_if_cancelled(cancel_requested)
-        lint_service.rebuild_global_with_session(session)
-        all_knowledge_documents = [
-            {
-                "title": doc.title,
-                "slug": doc.slug,
-                "kind": doc.kind,
-                "summary": doc.summary or "",
-                "href": knowledge_href(doc.kind, doc.slug),
-                "source_refs": doc.source_refs or "",
-                "source_spaces": source_space_keys(doc.source_refs),
-            }
-            for doc in session.scalars(
-                select(KnowledgeDocument).where(KnowledgeDocument.space_id == global_space.id)
-            ).all()
-        ]
+        if selected_page_ids is None:
+            logger.info("rebuild stage space=%s step=lint", global_space.space_key)
+            self._emit_progress(progress_callback, 95, "lint 보고서를 재구성하는 중입니다.")
+            self._raise_if_cancelled(cancel_requested)
+            lint_service.rebuild_global_with_session(session)
+        else:
+            logger.info("rebuild stage space=%s step=lint deferred", global_space.space_key)
+            self._emit_progress(progress_callback, 95, "lint 보고서는 별도 유지보수 주기에 갱신합니다.")
+            self._raise_if_cancelled(cancel_requested)
+
         logger.info("rebuild stage space=%s step=index", global_space.space_key)
         self._emit_progress(progress_callback, 97, "인덱스를 재구성하는 중입니다.")
         knowledge_service._rebuild_indexes_for_space(session, global_space, affected_space_keys=affected_space_keys)
-        page_rows = session.execute(
-            select(Page, WikiDocument, Space)
-            .join(WikiDocument, WikiDocument.page_id == Page.id)
-            .join(Space, Space.id == Page.space_id)
-            .where(Space.space_key != global_space.space_key)
-        ).all()
-        all_page_documents = [
-            {
-                "title": page.title,
-                "slug": page.slug,
-                "space_key": space.space_key,
-                "updated_at": page.updated_at_remote.isoformat() if page.updated_at_remote else "",
-                "summary": wiki_document.summary or "",
-                "href": f"/spaces/{space.space_key}/pages/{page.slug}",
-            }
-            for page, wiki_document, space in page_rows
-        ]
+        if selected_page_ids is None:
+            all_knowledge_documents = [
+                {
+                    "title": doc.title,
+                    "slug": doc.slug,
+                    "kind": doc.kind,
+                    "summary": doc.summary or "",
+                    "href": knowledge_href(doc.kind, doc.slug),
+                    "source_refs": doc.source_refs or "",
+                    "source_spaces": source_space_keys(doc.source_refs),
+                }
+                for doc in session.scalars(
+                    select(KnowledgeDocument).where(KnowledgeDocument.space_id == global_space.id)
+                ).all()
+            ]
+            page_rows = session.execute(
+                select(Page, WikiDocument, Space)
+                .join(WikiDocument, WikiDocument.page_id == Page.id)
+                .join(Space, Space.id == Page.space_id)
+                .where(Space.space_key != global_space.space_key)
+            ).all()
+            all_page_documents = [
+                {
+                    "title": page.title,
+                    "slug": page.slug,
+                    "space_key": space.space_key,
+                    "updated_at": page.updated_at_remote.isoformat() if page.updated_at_remote else "",
+                    "summary": wiki_document.summary or "",
+                    "href": f"/spaces/{space.space_key}/pages/{page.slug}",
+                }
+                for page, wiki_document, space in page_rows
+            ]
 
-        logger.info("rebuild stage space=%s step=graph", global_space.space_key)
-        self._emit_progress(progress_callback, 99, "그래프 캐시를 재구성하는 중입니다.")
-        self._raise_if_cancelled(cancel_requested)
-        page_id_lookup = {page.id: page for page in all_pages}
-        nodes = [
-            {
-                "id": page.id,
-                "title": page.title,
-                "space_key": space_lookup.get(page.space_id, ""),
-                "slug": page.slug,
-            }
-            for page in all_pages
-        ]
-        page_links = session.scalars(select(PageLink)).all()
-        edges = [
-            {"source": link.source_page_id, "target": link.target_page_id, "link_type": link.link_type}
-            for link in page_links
-            if link.target_page_id in page_id_lookup and link.source_page_id in page_id_lookup
-        ]
-        write_graph_cache(self.settings.wiki_root, build_graph_payload(nodes=nodes, edges=edges))
-        write_named_graph_cache(
-            self.settings.wiki_root,
-            "knowledge-graph.json",
-            build_knowledge_graph_payload(
-                knowledge_documents=all_knowledge_documents,
-                page_documents=all_page_documents,
-            ),
-        )
+            logger.info("rebuild stage space=%s step=graph", global_space.space_key)
+            self._emit_progress(progress_callback, 99, "그래프 캐시를 재구성하는 중입니다.")
+            self._raise_if_cancelled(cancel_requested)
+            page_id_lookup = {page.id: page for page in all_pages}
+            nodes = [
+                {
+                    "id": page.id,
+                    "title": page.title,
+                    "space_key": space_lookup.get(page.space_id, ""),
+                    "slug": page.slug,
+                }
+                for page in all_pages
+            ]
+            page_links = session.scalars(select(PageLink)).all()
+            edges = [
+                {"source": link.source_page_id, "target": link.target_page_id, "link_type": link.link_type}
+                for link in page_links
+                if link.target_page_id in page_id_lookup and link.source_page_id in page_id_lookup
+            ]
+            write_graph_cache(self.settings.wiki_root, build_graph_payload(nodes=nodes, edges=edges))
+            write_named_graph_cache(
+                self.settings.wiki_root,
+                "knowledge-graph.json",
+                build_knowledge_graph_payload(
+                    knowledge_documents=all_knowledge_documents,
+                    page_documents=all_page_documents,
+                ),
+            )
+        else:
+            logger.info("rebuild stage space=%s step=graph deferred", global_space.space_key)
+            self._emit_progress(progress_callback, 99, "그래프 캐시는 다음 조회 시 다시 계산합니다.")
+            self._raise_if_cancelled(cancel_requested)
+            self._invalidate_graph_caches()
 
     @staticmethod
     def _parse_datetime(value: str | None) -> datetime | None:

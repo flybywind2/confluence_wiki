@@ -183,6 +183,63 @@ def test_rebuild_materialized_views_passes_selected_page_ids_to_knowledge_rebuil
     assert captured == [{1, 2}]
 
 
+def test_rebuild_materialized_views_skips_inline_lint_and_invalidates_graph_cache_for_selected_pages(
+    sample_settings_dict,
+    tmp_path,
+    monkeypatch,
+):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+        }
+    )
+    service = SyncService(settings=settings)
+    session = service.session_factory()
+    lint_calls: list[str] = []
+    graph_root = settings.wiki_root / "global"
+    graph_root.mkdir(parents=True, exist_ok=True)
+    (graph_root / "graph.json").write_text("{}", encoding="utf-8")
+    (graph_root / "knowledge-graph.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        sync_service_module.KnowledgeService,
+        "rebuild_global_with_session",
+        lambda self, session, selected_page_ids=None, progress_callback=None, cancel_requested=None: [],
+    )
+    monkeypatch.setattr(
+        sync_service_module.KnowledgeService,
+        "_rebuild_indexes_for_space",
+        lambda self, session, _space, affected_space_keys=None: None,
+    )
+    monkeypatch.setattr(
+        sync_service_module.LintService,
+        "rebuild_global_with_session",
+        lambda self, session: lint_calls.append("lint"),
+    )
+    monkeypatch.setattr(
+        sync_service_module,
+        "write_graph_cache",
+        lambda *args, **kwargs: pytest.fail("graph cache should not be rebuilt for selected-page sync"),
+    )
+    monkeypatch.setattr(
+        sync_service_module,
+        "write_named_graph_cache",
+        lambda *args, **kwargs: pytest.fail("knowledge graph cache should not be rebuilt for selected-page sync"),
+    )
+
+    try:
+        service._rebuild_materialized_views(session, selected_page_ids={1, 2})
+    finally:
+        session.close()
+
+    assert lint_calls == []
+    assert not (graph_root / "graph.json").exists()
+    assert not (graph_root / "knowledge-graph.json").exists()
+
+
 def test_rebuild_materialized_views_converts_knowledge_cancel_to_sync_cancel(sample_settings_dict, tmp_path, monkeypatch):
     settings = Settings.model_validate(
         {

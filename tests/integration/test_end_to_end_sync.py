@@ -193,10 +193,9 @@ def test_incremental_sync_rebuilds_indexes_from_existing_db_state(tmp_path, samp
     second_service.run_incremental(space_key="DEMO")
 
     index_text = (tmp_path / "wiki" / "spaces" / "DEMO" / "index.md").read_text(encoding="utf-8")
-    graph_text = (tmp_path / "wiki" / "global" / "graph.json").read_text(encoding="utf-8")
 
     assert "child-page-200" in index_text
-    assert "child-page-200" in graph_text
+    assert not (tmp_path / "wiki" / "global" / "graph.json").exists()
 
 
 def test_incremental_sync_commits_each_processed_page_before_later_failure(tmp_path, sample_settings_dict):

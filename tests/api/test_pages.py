@@ -246,6 +246,30 @@ def test_knowledge_board_paginates_and_sanitizes_summary(tmp_path, sample_settin
     assert "요약 14 상세 설명과 근거 문장을 담습니다" in first_page.text
 
 
+def test_api_graph_rebuilds_missing_cache_from_db(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+    graph_path = tmp_path / "wiki" / "global" / "graph.json"
+    knowledge_graph_path = tmp_path / "wiki" / "global" / "knowledge-graph.json"
+    graph_path.unlink(missing_ok=True)
+    knowledge_graph_path.unlink(missing_ok=True)
+
+    client = TestClient(create_app(settings=settings, allow_test_fallback=False))
+    _login(client, "viewer")
+
+    raw_response = client.get("/api/graph?view=raw")
+    knowledge_response = client.get("/api/graph?view=knowledge")
+
+    assert raw_response.status_code == 200
+    assert knowledge_response.status_code == 200
+    assert graph_path.exists()
+    assert knowledge_graph_path.exists()
+    assert raw_response.json()["nodes"]
+    assert knowledge_response.json()["nodes"]
+
+
 def test_home_page_paginates_long_knowledge_lists(tmp_path, sample_settings_dict):
     sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
     sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
