@@ -1,12 +1,14 @@
 import json
 
+import pytest
 from sqlalchemy import select
 
 from app.core.config import Settings
 from app.db.models import Page
 from app.demo_seed import seed_demo_content
 from app.llm.text_client import TextLLMClient
-from app.services.knowledge_service import KnowledgeService
+import app.services.knowledge_service as knowledge_service_module
+from app.services.knowledge_service import KnowledgeRebuildCancelledError, KnowledgeService
 from app.services.knowledge_service import PhraseToken
 from app.services.sync_service import SyncService
 
@@ -219,6 +221,98 @@ def test_rebuild_global_with_selected_page_ids_only_rebuilds_touched_topics(tmp_
     assert "아키텍처 메모" in summarize_titles
     assert "Confluence Wiki Demo 홈" in summarize_titles
     assert set(update_topics) <= {"아키텍처", "아키텍처 메모"}
+
+
+def test_rebuild_global_with_selected_page_ids_honors_cancel_request(tmp_path, sample_settings_dict):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    sample_settings_dict["DATABASE_URL"] = f"sqlite:///{tmp_path / 'app.db'}"
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+    service = KnowledgeService(settings)
+    session = service.session_factory()
+    try:
+        page = session.scalar(select(Page).where(Page.slug == "architecture-notes-9101"))
+        assert page is not None
+        with pytest.raises(KnowledgeRebuildCancelledError):
+            service.rebuild_global_with_session(session, selected_page_ids={page.id}, cancel_requested=lambda: True)
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_save_query_wiki_uses_search_index_candidates_instead_of_scanning_all_pages(
+    tmp_path,
+    sample_settings_dict,
+    monkeypatch,
+):
+    sample_settings_dict["WIKI_ROOT"] = str(tmp_path / "wiki")
+    sample_settings_dict["CACHE_ROOT"] = str(tmp_path / "cache")
+    sample_settings_dict["DATABASE_URL"] = f"sqlite:///{tmp_path / 'app.db'}"
+    settings = Settings.model_validate(sample_settings_dict)
+    seed_demo_content(settings)
+    service = KnowledgeService(settings)
+    session = service.session_factory()
+    read_paths: list[str] = []
+    try:
+        arch_page = session.scalar(select(Page).where(Page.slug == "architecture-notes-9101"))
+        assert arch_page is not None
+        monkeypatch.setattr(
+            service.search_index_service,
+            "needs_initial_backfill",
+            lambda _session: False,
+        )
+        monkeypatch.setattr(
+            service.search_index_service,
+            "find_candidate_page_ids",
+            lambda _session, **_kwargs: [arch_page.id],
+        )
+        original_read = knowledge_service_module.read_markdown_body
+        monkeypatch.setattr(
+            knowledge_service_module,
+            "read_markdown_body",
+            lambda path: read_paths.append(path.name) or original_read(path),
+        )
+        monkeypatch.setattr(service.text_client, "classify_topic_type", lambda **_kwargs: "concept")
+        monkeypatch.setattr(
+            service.text_client,
+            "update_topic_page",
+            lambda **kwargs: "\n".join(
+                [
+                    f"# {kwargs['topic']}",
+                    "",
+                    "## 개요",
+                    "",
+                    "테스트",
+                    "",
+                    "## 핵심 사실",
+                    "",
+                    "- 테스트",
+                    "",
+                    "## 관련 문서",
+                    "",
+                    "- 테스트",
+                    "",
+                    "## 관련 주제",
+                    "",
+                    "- 없음",
+                    "",
+                    "## 원문 근거",
+                    "",
+                    "- 테스트",
+                ]
+            ),
+        )
+
+        service.save_query_wiki_with_session(session, query="아키텍처")
+    finally:
+        session.rollback()
+        session.close()
+
+    assert "architecture-notes-9101.md" in read_paths
+    assert "demo-home-9001.md" not in read_paths
+    assert "ops-dashboard-9002.md" not in read_paths
+    assert "sync-runbook-9003.md" not in read_paths
 
 
 def test_ensure_keyword_sections_replaces_title_only_key_facts_with_multiple_real_content_lines(tmp_path, sample_settings_dict):

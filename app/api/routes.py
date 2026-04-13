@@ -44,6 +44,7 @@ _WIKI_LINK_RE = re.compile(r"!\[\[(?P<embed>[^\]]+)\]\]|\[\[(?P<target>[^\]|]+)(
 _MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*")
 _MARKDOWN_LIST_RE = re.compile(r"^[>\-\*\d\.\)\s]+")
 _MARKDOWN_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*$")
+_USER_VISIBLE_KNOWLEDGE_KINDS = ("keyword", "analysis", "query", "lint")
 
 
 def _templates(request: Request) -> Jinja2Templates:
@@ -164,19 +165,25 @@ def _visible_spaces(session) -> list[Space]:
 
 
 def _sidebar_metrics(session) -> dict[str, int]:
-    spaces = _visible_spaces(session)
     raw_page_count = int(session.scalar(select(func.count(Page.id))) or 0)
-    visible_kinds = {"keyword", "analysis", "query", "lint"}
-    knowledge_rows = session.scalars(
-        select(KnowledgeDocument.kind)
-        .join(Space, Space.id == KnowledgeDocument.space_id)
-        .where(Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY)
-    ).all()
-    knowledge_count = sum(1 for kind in knowledge_rows if normalize_knowledge_kind(kind) in visible_kinds)
+    source_space_count = int(
+        session.scalar(select(func.count(Space.id)).where(Space.space_key != GLOBAL_KNOWLEDGE_SPACE_KEY)) or 0
+    )
+    knowledge_count = int(
+        session.scalar(
+            select(func.count(KnowledgeDocument.id))
+            .join(Space, Space.id == KnowledgeDocument.space_id)
+            .where(
+                Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY,
+                KnowledgeDocument.kind.in_(_USER_VISIBLE_KNOWLEDGE_KINDS),
+            )
+        )
+        or 0
+    )
     return {
         "raw_page_count": raw_page_count,
         "knowledge_count": knowledge_count,
-        "source_space_count": len(spaces),
+        "source_space_count": source_space_count,
     }
 
 
@@ -288,6 +295,100 @@ def _paginate_items(items: list[dict], page: int, per_page: int) -> tuple[list[d
         "next_page": current_page + 1,
         "window": window,
     }
+
+
+def _build_pagination_meta(page: int, per_page: int, total_items: int) -> dict | None:
+    if total_items <= 0:
+        return None
+    total_pages = max(1, (total_items + per_page - 1) // per_page)
+    current_page = min(max(page, 1), total_pages)
+    if total_pages <= 1:
+        return {
+            "page": current_page,
+            "per_page": per_page,
+            "total_items": total_items,
+            "total_pages": total_pages,
+            "has_prev": False,
+            "has_next": False,
+            "prev_page": 1,
+            "next_page": 1,
+            "window": [1],
+        }
+    window: list[int | None] = []
+    if total_pages <= 7:
+        window = list(range(1, total_pages + 1))
+    else:
+        candidates = {1, total_pages}
+        for value in range(current_page - 2, current_page + 3):
+            if 1 <= value <= total_pages:
+                candidates.add(value)
+        ordered = sorted(candidates)
+        previous = None
+        for number in ordered:
+            if previous is not None and number - previous > 1:
+                window.append(None)
+            window.append(number)
+            previous = number
+    return {
+        "page": current_page,
+        "per_page": per_page,
+        "total_items": total_items,
+        "total_pages": total_pages,
+        "has_prev": current_page > 1,
+        "has_next": current_page < total_pages,
+        "prev_page": current_page - 1,
+        "next_page": current_page + 1,
+        "window": window,
+    }
+
+
+def _knowledge_documents_statement(
+    *,
+    space: str | None = None,
+    kind: str | None = None,
+    recent_days: int | None = None,
+    query_text: str | None = None,
+):
+    statement = (
+        select(KnowledgeDocument)
+        .join(Space, Space.id == KnowledgeDocument.space_id)
+        .where(
+            Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY,
+            KnowledgeDocument.kind.in_(_USER_VISIBLE_KNOWLEDGE_KINDS),
+        )
+    )
+    normalized_kind = normalize_knowledge_kind(kind) if kind and kind not in {"", "all"} else None
+    if normalized_kind:
+        statement = statement.where(KnowledgeDocument.kind == normalized_kind)
+    if recent_days is not None:
+        cutoff = datetime.now() - timedelta(days=recent_days)
+        statement = statement.where(KnowledgeDocument.updated_at >= cutoff)
+    if query_text:
+        pattern = f"%{query_text}%"
+        statement = statement.where(
+            or_(
+                KnowledgeDocument.title.ilike(pattern),
+                KnowledgeDocument.slug.ilike(pattern),
+                KnowledgeDocument.summary.ilike(pattern),
+            )
+        )
+    if space and space not in {"", "all"}:
+        statement = statement.where(KnowledgeDocument.source_refs.ilike(f"%spaces/{space}/pages/%"))
+    return statement
+
+
+def _paginate_statement(session, statement, page: int, per_page: int):
+    count_statement = select(func.count()).select_from(statement.order_by(None).subquery())
+    total_items = int(session.scalar(count_statement) or 0)
+    pagination = _build_pagination_meta(page, per_page, total_items)
+    if pagination is None:
+        return [], None
+    rows = session.scalars(
+        statement.order_by(KnowledgeDocument.updated_at.desc(), KnowledgeDocument.title.asc())
+        .limit(per_page)
+        .offset((pagination["page"] - 1) * per_page)
+    ).all()
+    return rows, pagination
 
 
 def _pagination_links(path: str, params: dict[str, str], pagination: dict | None) -> dict | None:
@@ -943,23 +1044,16 @@ async def index(
             return auth_result
         spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
-        knowledge_query = (
-            select(KnowledgeDocument, Space)
-            .join(Space, Space.id == KnowledgeDocument.space_id)
-            .where(Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY)
-        )
-        knowledge_rows = session.execute(knowledge_query).all()
         recent_days = _parse_recent_days(recent)
+        knowledge_statement = _knowledge_documents_statement(space=space, kind=kind, recent_days=recent_days)
+        page_docs, pagination = _paginate_statement(session, knowledge_statement, page, per_page=10)
         pages = [
             {
                 **_knowledge_result_item(doc, "global", ", ".join(_space_names_for_doc(doc, space_name_by_key))),
                 "source_space_names": _space_names_for_doc(doc, space_name_by_key),
             }
-            for doc, doc_space in knowledge_rows
-            if _is_user_visible_knowledge(doc) and _matches_filters(doc, kind, recent_days) and _space_filter_matches(doc, space)
+            for doc in page_docs
         ]
-        pages.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
-        pages, pagination = _paginate_items(pages, page, per_page=10)
         pagination = _pagination_links(
             request.url.path,
             {"space": space or "", "kind": kind or "", "recent": recent or ""},
@@ -969,11 +1063,11 @@ async def index(
         featured_topics = []
         recent_sources = []
         if show_home_rail:
-            featured_docs = [
-                doc
-                for doc, _doc_space in knowledge_rows
-                if _is_user_visible_knowledge(doc) and normalize_knowledge_kind(doc.kind) in {"keyword", "query"}
-            ]
+            featured_docs = session.scalars(
+                _knowledge_documents_statement()
+                .where(KnowledgeDocument.kind.in_(("keyword", "query")))
+                .limit(24)
+            ).all()
             featured_docs.sort(
                 key=lambda doc: (
                     _source_page_count_for_doc(doc),
@@ -1050,33 +1144,23 @@ async def knowledge_board(
             return auth_result
         spaces = _visible_spaces(session)
         space_name_by_key = _space_name_by_key(spaces)
-        knowledge_query = (
-            select(KnowledgeDocument, Space)
-            .join(Space, Space.id == KnowledgeDocument.space_id)
-            .where(Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY)
-        )
-        knowledge_rows = session.execute(knowledge_query).all()
         recent_days = _parse_recent_days(recent)
         submitted_query = str(q or "").strip().lower()
-        board_rows = []
-        for doc, _doc_space in knowledge_rows:
-            if not _is_user_visible_knowledge(doc):
-                continue
-            if not _matches_filters(doc, kind, recent_days):
-                continue
-            haystack = " ".join([str(doc.title or ""), str(doc.slug or ""), str(doc.summary or "")]).lower()
-            if submitted_query and submitted_query not in haystack:
-                continue
-            board_rows.append(
-                {
-                    **_knowledge_result_item(doc, "global", ", ".join(_space_names_for_doc(doc, space_name_by_key))),
-                    "source_space_names": _space_names_for_doc(doc, space_name_by_key),
-                    "source_count": _source_page_count_for_doc(doc),
-                    "summary": _display_summary_excerpt(doc.summary, title=doc.title),
-                }
-            )
-        board_rows.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
-        board_rows, pagination = _paginate_items(board_rows, page, per_page=12)
+        board_statement = _knowledge_documents_statement(
+            kind=kind,
+            recent_days=recent_days,
+            query_text=submitted_query or None,
+        )
+        board_docs, pagination = _paginate_statement(session, board_statement, page, per_page=12)
+        board_rows = [
+            {
+                **_knowledge_result_item(doc, "global", ", ".join(_space_names_for_doc(doc, space_name_by_key))),
+                "source_space_names": _space_names_for_doc(doc, space_name_by_key),
+                "source_count": _source_page_count_for_doc(doc),
+                "summary": _display_summary_excerpt(doc.summary, title=doc.title),
+            }
+            for doc in board_docs
+        ]
         pagination = _pagination_links(
             request.url.path,
             {"q": q, "kind": kind or "", "recent": recent or ""},
@@ -1414,30 +1498,27 @@ async def search(
         space_name_by_key = _space_name_by_key(spaces)
         results = []
         if q:
-            knowledge_query = (
-                select(KnowledgeDocument, Space)
-                .join(Space)
-                .where(Space.space_key == GLOBAL_KNOWLEDGE_SPACE_KEY)
-            )
-            knowledge_query = knowledge_query.where(
-                or_(
-                    KnowledgeDocument.title.ilike(f"%{q}%"),
-                    KnowledgeDocument.slug.ilike(f"%{q}%"),
-                    KnowledgeDocument.summary.ilike(f"%{q}%"),
-                )
-            )
-            knowledge_rows = session.execute(knowledge_query.limit(50)).all()
             recent_days = _parse_recent_days(recent)
+            results_docs, pagination = _paginate_statement(
+                session,
+                _knowledge_documents_statement(
+                    space=space,
+                    kind=kind,
+                    recent_days=recent_days,
+                    query_text=q,
+                ),
+                page,
+                per_page=10,
+            )
             results = [
                 {
                     **_knowledge_result_item(doc, "global", ", ".join(_space_names_for_doc(doc, space_name_by_key))),
                     "source_space_names": _space_names_for_doc(doc, space_name_by_key),
                 }
-                for doc, doc_space in knowledge_rows
-                if _is_user_visible_knowledge(doc) and _matches_filters(doc, kind, recent_days) and _space_filter_matches(doc, space)
+                for doc in results_docs
             ]
-            results.sort(key=lambda item: (item["sort_value"], item["title"].lower()), reverse=True)
-        results, pagination = _paginate_items(results, page, per_page=10)
+        else:
+            pagination = None
         pagination = _pagination_links(
             request.url.path,
             {"q": q, "space": space or "", "kind": kind or "", "recent": recent or ""},

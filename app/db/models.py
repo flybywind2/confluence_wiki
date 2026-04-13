@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -44,6 +44,10 @@ class Space(Base):
 
 class Page(Base):
     __tablename__ = "pages"
+    __table_args__ = (
+        UniqueConstraint("space_id", "confluence_page_id", name="uq_pages_space_confluence_page"),
+        UniqueConstraint("space_id", "slug", name="uq_pages_space_slug"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     confluence_page_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -66,6 +70,9 @@ class Page(Base):
 
 class PageVersion(Base):
     __tablename__ = "page_versions"
+    __table_args__ = (
+        UniqueConstraint("page_id", "version_number", name="uq_page_versions_page_version"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     page_id: Mapped[int] = mapped_column(ForeignKey("pages.id"), nullable=False, index=True)
@@ -101,6 +108,9 @@ class Asset(Base):
 
 class PageLink(Base):
     __tablename__ = "page_links"
+    __table_args__ = (
+        Index("ix_page_links_source_target_type", "source_page_id", "target_page_id", "link_type"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_page_id: Mapped[int] = mapped_column(ForeignKey("pages.id"), nullable=False, index=True)
@@ -126,6 +136,9 @@ class SyncRun(Base):
 
 class SyncCursor(Base):
     __tablename__ = "sync_cursors"
+    __table_args__ = (
+        UniqueConstraint("space_id", "cursor_type", name="uq_sync_cursors_space_cursor_type"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"), nullable=False, index=True)
@@ -167,6 +180,9 @@ class SyncLease(Base):
 
 class WikiDocument(Base):
     __tablename__ = "wiki_documents"
+    __table_args__ = (
+        UniqueConstraint("page_id", name="uq_wiki_documents_page"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     page_id: Mapped[int] = mapped_column(ForeignKey("pages.id"), nullable=False, index=True)
@@ -180,6 +196,9 @@ class WikiDocument(Base):
 
 class KnowledgeDocument(Base):
     __tablename__ = "knowledge_documents"
+    __table_args__ = (
+        UniqueConstraint("space_id", "kind", "slug", name="uq_knowledge_documents_space_kind_slug"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"), nullable=False, index=True)
@@ -193,3 +212,16 @@ class KnowledgeDocument(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
     space: Mapped[Space] = relationship(back_populates="knowledge_documents")
+
+
+class RawPageChunk(Base):
+    __tablename__ = "raw_page_chunks"
+    __table_args__ = (
+        UniqueConstraint("page_id", "chunk_no", name="uq_raw_page_chunks_page_chunk"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    page_id: Mapped[int] = mapped_column(ForeignKey("pages.id"), nullable=False, index=True)
+    chunk_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)

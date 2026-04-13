@@ -26,6 +26,7 @@ from app.db.models import KnowledgeDocument, Page, PageLink, Space, WikiDocument
 from app.db.session import create_session_factory
 from app.llm.text_client import TextLLMClient
 from app.services.index_builder import append_space_log, build_global_index, build_space_index, build_space_synthesis, read_space_log_excerpt
+from app.services.search_index import SearchIndexService
 from app.services.space_registry import ensure_global_knowledge_space
 from app.services.wiki_writer import write_global_document, write_knowledge_markdown, write_markdown_file
 
@@ -464,11 +465,16 @@ class PhraseCandidate:
     sources: set[str] = field(default_factory=set)
 
 
+class KnowledgeRebuildCancelledError(Exception):
+    pass
+
+
 class KnowledgeService:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.session_factory = create_session_factory(self.settings.database_url)
         self.text_client = TextLLMClient(self.settings)
+        self.search_index_service = SearchIndexService(self.settings)
 
     def rebuild_space(self, space_key: str) -> list[KnowledgeDocument]:
         return self.rebuild_global()
@@ -493,6 +499,7 @@ class KnowledgeService:
         session,
         selected_page_ids: set[int] | None = None,
         progress_callback: Callable[[int, str], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> list[KnowledgeDocument]:
         global_space = ensure_global_knowledge_space(session)
         existing_keyword_topics = self._existing_topic_context(session, global_space.id)
@@ -506,6 +513,7 @@ class KnowledgeService:
                 wiki_state=wiki_state,
                 selected_page_ids=selected_page_ids,
                 progress_callback=progress_callback,
+                cancel_requested=cancel_requested,
             )
 
         session.execute(
@@ -517,13 +525,18 @@ class KnowledgeService:
 
         page_rows = self._load_page_rows(session)
         docs: list[KnowledgeDocument] = []
-        fact_cards = self._build_fact_cards_from_page_rows(page_rows, progress_callback=progress_callback)
+        fact_cards = self._build_fact_cards_from_page_rows(
+            page_rows,
+            progress_callback=progress_callback,
+            cancel_requested=cancel_requested,
+        )
 
         for keyword in self._build_keyword_documents(
             fact_cards,
             existing_keyword_topics,
             wiki_state,
             progress_callback=progress_callback,
+            cancel_requested=cancel_requested,
         ):
             docs.append(
                 self._upsert_document(
@@ -548,12 +561,17 @@ class KnowledgeService:
         wiki_state: str,
         selected_page_ids: set[int],
         progress_callback: Callable[[int, str], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> list[KnowledgeDocument]:
         page_rows = self._load_page_rows(session, selected_page_ids)
         if not page_rows:
             return []
 
-        fact_cards = self._build_fact_cards_from_page_rows(page_rows, progress_callback=progress_callback)
+        fact_cards = self._build_fact_cards_from_page_rows(
+            page_rows,
+            progress_callback=progress_callback,
+            cancel_requested=cancel_requested,
+        )
         existing_topic_titles = [topic["title"] for topic in existing_keyword_topics.values()]
         selected_topics_by_slug, _total_scores, _doc_counts = self._select_topics_for_fact_cards(
             fact_cards,
@@ -590,7 +608,9 @@ class KnowledgeService:
 
         docs: list[KnowledgeDocument] = []
         total_topics = len(affected_topic_keys)
+        source_item_cache: dict[tuple[str, str], dict[str, str]] = {}
         for index, topic_key in enumerate(sorted(affected_topic_keys), start=1):
+            self._raise_if_cancelled(cancel_requested)
             if progress_callback is not None:
                 progress_callback(94, f"지식 주제 {index}/{total_topics}건을 재구성하는 중입니다.")
             existing_topic = existing_keyword_topics.get(topic_key, {})
@@ -598,7 +618,7 @@ class KnowledgeService:
             retained_refs = [
                 ref for ref in self._knowledge_source_page_keys(existing_topic.get("source_refs", "")) if ref not in affected_page_refs
             ]
-            retained_items = self._load_raw_source_items_for_refs(session, retained_refs)
+            retained_items = self._load_raw_source_items_for_refs(session, retained_refs, cache=source_item_cache)
             current_items = [
                 item
                 for item in fact_cards
@@ -652,14 +672,39 @@ class KnowledgeService:
             statement = statement.where(Page.id.in_(selected_page_ids))
         return session.execute(statement).all()
 
+    def _load_query_candidate_page_rows(
+        self,
+        session,
+        *,
+        candidate_page_ids: list[int],
+        selected_space: str | None,
+    ):
+        statement = (
+            select(Page, WikiDocument, Space)
+            .join(WikiDocument, WikiDocument.page_id == Page.id)
+            .join(Space, Space.id == Page.space_id)
+            .where(Space.space_key != GLOBAL_KNOWLEDGE_SPACE_KEY)
+        )
+        if selected_space and selected_space not in {"", "all"}:
+            statement = statement.where(Space.space_key == selected_space)
+        rows = session.execute(statement).all() if not candidate_page_ids else session.execute(
+            statement.where(Page.id.in_(candidate_page_ids))
+        ).all()
+        if not candidate_page_ids:
+            return rows
+        order = {page_id: index for index, page_id in enumerate(candidate_page_ids)}
+        return sorted(rows, key=lambda row: order.get(row[0].id, len(order)))
+
     def _build_fact_cards_from_page_rows(
         self,
         page_rows,
         progress_callback: Callable[[int, str], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> list[dict[str, str]]:
         fact_cards: list[dict[str, str]] = []
         total_rows = len(page_rows)
         for index, (page, wiki_document, page_space) in enumerate(page_rows, start=1):
+            self._raise_if_cancelled(cancel_requested)
             markdown_path = self.settings.wiki_root / wiki_document.markdown_path
             body = read_markdown_body(markdown_path) if markdown_path.exists() else ""
             summary = wiki_document.summary or self._first_line(body)
@@ -820,12 +865,21 @@ class KnowledgeService:
             raise ValueError("query is required")
         notify(8, "검색 질의를 정리하는 중입니다.")
         global_space = ensure_global_knowledge_space(session)
-        page_rows = session.execute(
-            select(Page, WikiDocument, Space)
-            .join(WikiDocument, WikiDocument.page_id == Page.id)
-            .join(Space, Space.id == Page.space_id)
-            .where(Space.space_key != GLOBAL_KNOWLEDGE_SPACE_KEY)
-        ).all()
+        if self.search_index_service.needs_initial_backfill(session):
+            notify(12, "검색 인덱스를 준비하는 중입니다.")
+            self.search_index_service.reindex_pages(session)
+            session.flush()
+        candidate_page_ids = self.search_index_service.find_candidate_page_ids(
+            session,
+            query=normalized_query,
+            selected_space=selected_space,
+            limit=max(max_documents * 8, 32),
+        )
+        page_rows = self._load_query_candidate_page_rows(
+            session,
+            candidate_page_ids=candidate_page_ids,
+            selected_space=selected_space,
+        )
         total_rows = len(page_rows)
         notify(15, f"raw 문서 {total_rows}건을 확인하는 중입니다.")
         ranked: list[tuple[int, dict[str, str]]] = []
@@ -1272,7 +1326,7 @@ class KnowledgeService:
             statement = statement.where(KnowledgeDocument.space_id == space_id)
         return session.scalars(statement).all()
 
-    def _rebuild_indexes_for_space(self, session, _space: Space) -> None:
+    def _rebuild_indexes_for_space(self, session, _space: Space, affected_space_keys: set[str] | None = None) -> None:
         global_space = ensure_global_knowledge_space(session)
         knowledge_docs = [
             {
@@ -1286,15 +1340,19 @@ class KnowledgeService:
             for doc in self.list_documents(session, global_space.id)
         ]
 
-        grouped_documents: dict[str, list[dict[str, str]]] = {}
         visible_spaces = session.scalars(
             select(Space).where(Space.space_key != GLOBAL_KNOWLEDGE_SPACE_KEY).order_by(Space.space_key)
         ).all()
-        for current_space in visible_spaces:
-            current_page_rows = session.execute(
-                select(Page, WikiDocument).join(WikiDocument, WikiDocument.page_id == Page.id).where(Page.space_id == current_space.id)
-            ).all()
-            current_page_docs = [
+        page_rows = session.execute(
+            select(Page, WikiDocument, Space)
+            .join(WikiDocument, WikiDocument.page_id == Page.id)
+            .join(Space, Space.id == Page.space_id)
+            .where(Space.space_key != GLOBAL_KNOWLEDGE_SPACE_KEY)
+            .order_by(Space.space_key, Page.title)
+        ).all()
+        grouped_page_docs: dict[str, list[dict[str, str]]] = {space.space_key: [] for space in visible_spaces}
+        for page, wiki_document, current_space in page_rows:
+            grouped_page_docs.setdefault(current_space.space_key, []).append(
                 {
                     "title": page.title,
                     "slug": page.slug,
@@ -1302,8 +1360,11 @@ class KnowledgeService:
                     "href": f"/spaces/{current_space.space_key}/pages/{page.slug}",
                     "kind": "page",
                 }
-                for page, wiki_document in current_page_rows
-            ]
+            )
+
+        grouped_documents: dict[str, list[dict[str, str]]] = {}
+        for current_space in visible_spaces:
+            current_page_docs = grouped_page_docs.get(current_space.space_key, [])
             grouped_documents[current_space.space_key] = [
                 *current_page_docs,
                 *[
@@ -1312,6 +1373,8 @@ class KnowledgeService:
                     if current_space.space_key in set(doc.get("source_spaces") or [])
                 ],
             ]
+            if affected_space_keys is not None and current_space.space_key not in affected_space_keys:
+                continue
             build_space_index(self.settings.wiki_root, current_space.space_key, current_page_docs, knowledge_docs)
             build_space_synthesis(
                 self.settings.wiki_root,
@@ -1513,6 +1576,7 @@ class KnowledgeService:
         existing_topics: dict[str, dict[str, str]],
         wiki_state: str,
         progress_callback: Callable[[int, str], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> list[dict[str, str]]:
         if not fact_cards:
             return []
@@ -1543,6 +1607,7 @@ class KnowledgeService:
         )
         total_topics = len(topics_to_build)
         for index, (topic, items) in enumerate(topics_to_build, start=1):
+            self._raise_if_cancelled(cancel_requested)
             if progress_callback is not None and total_topics:
                 progress_callback(94, f"지식 주제 {index}/{total_topics}건을 재구성하는 중입니다.")
             existing_topic = existing_topics.get(self._normalize_topic_key(topic), {})
@@ -1557,6 +1622,11 @@ class KnowledgeService:
                 )
             )
         return documents
+
+    @staticmethod
+    def _raise_if_cancelled(cancel_requested: Callable[[], bool] | None) -> None:
+        if cancel_requested is not None and cancel_requested():
+            raise KnowledgeRebuildCancelledError("knowledge rebuild cancelled")
 
     def _select_topics_for_fact_cards(
         self,
@@ -1657,30 +1727,41 @@ class KnowledgeService:
                 merged.append(item)
         return merged
 
-    def _load_raw_source_items_for_refs(self, session, refs: list[tuple[str, str]]) -> list[dict[str, str]]:
+    def _load_raw_source_items_for_refs(
+        self,
+        session,
+        refs: list[tuple[str, str]],
+        *,
+        cache: dict[tuple[str, str], dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
         if not refs:
             return []
-        items: list[dict[str, str]] = []
-        for space_key, slug in refs:
-            row = session.execute(
+        cache = cache if cache is not None else {}
+        requested_refs = [(space_key, slug) for space_key, slug in refs if space_key and slug]
+        missing_refs = [ref for ref in requested_refs if ref not in cache]
+        if missing_refs:
+            missing_ref_set = set(missing_refs)
+            space_keys = sorted({space_key for space_key, _slug in missing_refs})
+            slugs = sorted({slug for _space_key, slug in missing_refs})
+            rows = session.execute(
                 select(Page, WikiDocument, Space)
                 .join(WikiDocument, WikiDocument.page_id == Page.id)
                 .join(Space, Space.id == Page.space_id)
-                .where(Space.space_key == space_key, Page.slug == slug)
-            ).first()
-            if row is None:
-                continue
-            page, wiki_document, space = row
-            markdown_path = self.settings.wiki_root / wiki_document.markdown_path
-            body = read_markdown_body(markdown_path) if markdown_path.exists() else ""
-            body_excerpt = self._source_body_excerpt(body)
-            fact_card = self._source_fact_card(
-                page.title,
-                body,
-                wiki_document.summary or self._first_line(body) or page.title,
-            )
-            items.append(
-                {
+                .where(Space.space_key.in_(space_keys), Page.slug.in_(slugs))
+            ).all()
+            for page, wiki_document, space in rows:
+                key = (space.space_key, page.slug)
+                if key not in missing_ref_set:
+                    continue
+                markdown_path = self.settings.wiki_root / wiki_document.markdown_path
+                body = read_markdown_body(markdown_path) if markdown_path.exists() else ""
+                body_excerpt = self._source_body_excerpt(body)
+                fact_card = self._source_fact_card(
+                    page.title,
+                    body,
+                    wiki_document.summary or self._first_line(body) or page.title,
+                )
+                cache[key] = {
                     "title": page.title,
                     "slug": page.slug,
                     "space_key": space.space_key,
@@ -1694,7 +1775,11 @@ class KnowledgeService:
                     "body": body,
                     "body_excerpt": body_excerpt,
                 }
-            )
+        items: list[dict[str, str]] = []
+        for ref in requested_refs:
+            item = cache.get(ref)
+            if item is not None:
+                items.append(item)
         return items
 
     def _load_raw_source_items(self, session, source_refs: str | None) -> list[dict[str, str]]:

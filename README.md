@@ -4,6 +4,14 @@ Confluence Data Center mirror 기반 markdown wiki 서비스입니다. 여러 Sp
 
 지원 Python 버전은 `3.10.11+` 입니다.
 
+## 운영 문서
+
+- [Database migration guide](./db_migration.md)
+- [Alembic upgrade guide](./alembic_upgrade_head.md)
+- [SQLite scale guide](./sqlite_scale.md)
+- [SQLite scale design](./docs/plans/2026-04-13-sqlite-scale-design.md)
+- [SQLite scale implementation plan](./docs/plans/2026-04-13-sqlite-scale.md)
+
 ## 주요 기능
 
 - mirror URL 전용 읽기, prod URL 전용 원문 링크

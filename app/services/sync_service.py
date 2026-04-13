@@ -30,9 +30,10 @@ from app.llm.vision_client import VisionClient
 from app.parser.storage import storage_to_markdown
 from app.services.assets import BODY_IMAGE_PLACEHOLDER_RE, build_image_markdown, build_wiki_asset_url, is_image_filename, save_asset
 from app.services.cql import build_incremental_cql
-from app.services.index_builder import append_space_log, build_global_index, build_space_index, build_space_synthesis, read_space_log_excerpt
-from app.services.knowledge_service import KnowledgeService
+from app.services.index_builder import append_space_log
+from app.services.knowledge_service import KnowledgeRebuildCancelledError, KnowledgeService
 from app.services.lint_service import LintService
+from app.services.search_index import SearchIndexService
 from app.services.space_registry import ensure_global_knowledge_space, upsert_space
 from app.services.sync_window import build_day_before_yesterday_window
 from app.services.sync_lease import SyncLeaseHandle, SyncLeaseService
@@ -81,6 +82,7 @@ class SyncService:
         self.text_client = text_client
         self.session_factory = create_session_factory(self.settings.database_url)
         self.sync_lease_service = SyncLeaseService(self.settings)
+        self.search_index_service = SearchIndexService(self.settings)
         self._active_sync_lease: SyncLeaseHandle | None = None
         self._sync_lease_next_renewal_at: datetime | None = None
         self.settings.wiki_root.mkdir(parents=True, exist_ok=True)
@@ -495,6 +497,13 @@ class SyncService:
                 }
                 sync_run.processed_pages = index
                 sync_run.processed_assets = processed_assets
+                self.search_index_service.replace_page_chunks(
+                    session,
+                    page_id=page_record.id,
+                    title=page_record.title,
+                    summary=summary,
+                    body=markdown_body,
+                )
                 session.commit()
                 page_records[raw_page["id"]] = page_record
                 documents_for_index.append(page_document)
@@ -933,10 +942,20 @@ class SyncService:
         progress_callback: ProgressCallback | None = None,
         cancel_requested: CancelCallback | None = None,
     ) -> None:
-        grouped_documents: dict[str, list[dict[str, str]]] = {}
         all_pages = session.scalars(select(Page)).all()
         spaces = session.scalars(select(Space)).all()
         space_lookup = {space.id: space.space_key for space in spaces}
+        affected_space_keys = (
+            {
+                space_lookup.get(page.space_id, "")
+                for page in all_pages
+                if selected_page_ids is not None and page.id in selected_page_ids
+            }
+            if selected_page_ids is not None
+            else None
+        )
+        if affected_space_keys is not None:
+            affected_space_keys = {space_key for space_key in affected_space_keys if space_key and space_key != GLOBAL_KNOWLEDGE_SPACE_KEY}
         knowledge_service = KnowledgeService(self.settings)
         lint_service = LintService(self.settings)
         all_page_documents: list[dict[str, str]] = []
@@ -945,11 +964,15 @@ class SyncService:
         logger.info("rebuild stage space=%s step=knowledge", global_space.space_key)
         self._emit_progress(progress_callback, 93, "지식 문서를 재구성하는 중입니다.")
         self._raise_if_cancelled(cancel_requested)
-        knowledge_service.rebuild_global_with_session(
-            session,
-            selected_page_ids=selected_page_ids,
-            progress_callback=progress_callback,
-        )
+        try:
+            knowledge_service.rebuild_global_with_session(
+                session,
+                selected_page_ids=selected_page_ids,
+                progress_callback=progress_callback,
+                cancel_requested=cancel_requested,
+            )
+        except KnowledgeRebuildCancelledError as exc:
+            raise SyncCancelledError(str(exc)) from exc
 
         logger.info("rebuild stage space=%s step=lint", global_space.space_key)
         self._emit_progress(progress_callback, 95, "lint 보고서를 재구성하는 중입니다.")
@@ -971,37 +994,24 @@ class SyncService:
         ]
         logger.info("rebuild stage space=%s step=index", global_space.space_key)
         self._emit_progress(progress_callback, 97, "인덱스를 재구성하는 중입니다.")
-        for space_id, space_key in sorted(space_lookup.items(), key=lambda item: item[1]):
-            if space_key == global_space.space_key:
-                continue
-            rows = session.execute(
-                select(Page, WikiDocument)
-                .join(WikiDocument, WikiDocument.page_id == Page.id)
-                .where(Page.space_id == space_id)
-            ).all()
-            documents = [
-                {
-                    "title": page.title,
-                    "slug": page.slug,
-                    "space_key": space_key,
-                    "updated_at": page.updated_at_remote.isoformat() if page.updated_at_remote else "",
-                    "summary": _wiki_document.summary or "",
-                    "href": f"/spaces/{space_key}/pages/{page.slug}",
-                }
-                for page, _wiki_document in rows
-            ]
-            grouped_documents[space_key] = [*documents]
-            all_page_documents.extend(documents)
-            build_space_index(self.settings.wiki_root, space_key, documents, all_knowledge_documents)
-            build_space_synthesis(
-                self.settings.wiki_root,
-                space_key,
-                documents,
-                generated_at=datetime.now(ZoneInfo(self.settings.app_timezone)),
-                recent_log_entries=read_space_log_excerpt(self.settings.wiki_root, space_key),
-            )
-
-        build_global_index(self.settings.wiki_root, grouped_documents)
+        knowledge_service._rebuild_indexes_for_space(session, global_space, affected_space_keys=affected_space_keys)
+        page_rows = session.execute(
+            select(Page, WikiDocument, Space)
+            .join(WikiDocument, WikiDocument.page_id == Page.id)
+            .join(Space, Space.id == Page.space_id)
+            .where(Space.space_key != global_space.space_key)
+        ).all()
+        all_page_documents = [
+            {
+                "title": page.title,
+                "slug": page.slug,
+                "space_key": space.space_key,
+                "updated_at": page.updated_at_remote.isoformat() if page.updated_at_remote else "",
+                "summary": wiki_document.summary or "",
+                "href": f"/spaces/{space.space_key}/pages/{page.slug}",
+            }
+            for page, wiki_document, space in page_rows
+        ]
 
         logger.info("rebuild stage space=%s step=graph", global_space.space_key)
         self._emit_progress(progress_callback, 99, "그래프 캐시를 재구성하는 중입니다.")

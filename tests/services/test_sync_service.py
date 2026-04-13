@@ -128,10 +128,10 @@ def test_rebuild_materialized_views_emits_stage_progress(sample_settings_dict, t
     monkeypatch.setattr(
         sync_service_module.KnowledgeService,
         "rebuild_global_with_session",
-        lambda self, session, selected_page_ids=None, progress_callback=None: [],
+        lambda self, session, selected_page_ids=None, progress_callback=None, cancel_requested=None: [],
     )
+    monkeypatch.setattr(sync_service_module.KnowledgeService, "_rebuild_indexes_for_space", lambda self, session, _space, affected_space_keys=None: None)
     monkeypatch.setattr(sync_service_module.LintService, "rebuild_global_with_session", lambda self, session: None)
-    monkeypatch.setattr(sync_service_module, "build_global_index", lambda *args, **kwargs: None)
     monkeypatch.setattr(sync_service_module, "write_graph_cache", lambda *args, **kwargs: None)
     monkeypatch.setattr(sync_service_module, "write_named_graph_cache", lambda *args, **kwargs: None)
     monkeypatch.setattr(sync_service_module, "build_graph_payload", lambda **kwargs: {"nodes": [], "edges": []})
@@ -166,10 +166,10 @@ def test_rebuild_materialized_views_passes_selected_page_ids_to_knowledge_rebuil
     monkeypatch.setattr(
         sync_service_module.KnowledgeService,
         "rebuild_global_with_session",
-        lambda self, session, selected_page_ids=None, progress_callback=None: captured.append(selected_page_ids) or [],
+        lambda self, session, selected_page_ids=None, progress_callback=None, cancel_requested=None: captured.append(selected_page_ids) or [],
     )
+    monkeypatch.setattr(sync_service_module.KnowledgeService, "_rebuild_indexes_for_space", lambda self, session, _space, affected_space_keys=None: None)
     monkeypatch.setattr(sync_service_module.LintService, "rebuild_global_with_session", lambda self, session: None)
-    monkeypatch.setattr(sync_service_module, "build_global_index", lambda *args, **kwargs: None)
     monkeypatch.setattr(sync_service_module, "write_graph_cache", lambda *args, **kwargs: None)
     monkeypatch.setattr(sync_service_module, "write_named_graph_cache", lambda *args, **kwargs: None)
     monkeypatch.setattr(sync_service_module, "build_graph_payload", lambda **kwargs: {"nodes": [], "edges": []})
@@ -181,3 +181,27 @@ def test_rebuild_materialized_views_passes_selected_page_ids_to_knowledge_rebuil
         session.close()
 
     assert captured == [{1, 2}]
+
+
+def test_rebuild_materialized_views_converts_knowledge_cancel_to_sync_cancel(sample_settings_dict, tmp_path, monkeypatch):
+    settings = Settings.model_validate(
+        {
+            **sample_settings_dict,
+            "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
+            "WIKI_ROOT": str(tmp_path / "wiki"),
+            "CACHE_ROOT": str(tmp_path / "cache"),
+        }
+    )
+    service = SyncService(settings=settings)
+    session = service.session_factory()
+
+    def raise_cancel(self, session, selected_page_ids=None, progress_callback=None, cancel_requested=None):
+        raise sync_service_module.KnowledgeRebuildCancelledError("knowledge rebuild cancelled")
+
+    monkeypatch.setattr(sync_service_module.KnowledgeService, "rebuild_global_with_session", raise_cancel)
+
+    try:
+        with pytest.raises(sync_service_module.SyncCancelledError):
+            service._rebuild_materialized_views(session, selected_page_ids={1}, cancel_requested=lambda: True)
+    finally:
+        session.close()
